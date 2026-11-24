@@ -42,5 +42,5 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
-include = ["backend", "backend.*", "shared"]
+include = ["backend", "backend.*", "shared", "sim", "analysis"]
 namespaces = false
