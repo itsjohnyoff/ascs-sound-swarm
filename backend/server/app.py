@@ -1,0 +1,307 @@
+"""FastAPI entry point for the phones, dashboard, and judge console."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+from io import BytesIO
+from pathlib import Path
+from typing import Literal
+
+import anyio
+import segno
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, FiniteFloat, ValidationError
+
+from backend.server.audio_buffer import BUFFER_DURATION_S, decode_audio_frame
+from backend.server.processor import Processor
+from backend.server.session import CalibrationConflict, Session
+from shared.protocol import CalibrationMode, RoomConfig, SoundClass
+
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+SocketQueue = asyncio.Queue[dict]
+
+
+class Position(BaseModel):
+    label: str | None = None
+    x_m: FiniteFloat
+    y_m: FiniteFloat
+
+
+class PhoneHello(Position):
+    type: Literal["phone_hello"]
+    phone_id: str
+    sample_rate: int = Field(ge=8000, le=192000)
+    device_info: str = ""
+
+
+class CalibrateArm(BaseModel):
+    mode: CalibrationMode
+
+
+class CalibrateSolve(CalibrateArm):
+    calibration_id: str
+    window_s: float = Field(default=7.0, gt=0, le=BUFFER_DURATION_S)
+
+
+class NewTrial(BaseModel):
+    label: str
+    gt_x_m: FiniteFloat
+    gt_y_m: FiniteFloat
+    expected_class: SoundClass
+    event_id: str | None = None
+
+
+def _inside(room: RoomConfig, x_m: float, y_m: float) -> bool:
+    return 0 <= x_m <= room.width_m and 0 <= y_m <= room.height_m
+
+
+def _enqueue(queue: SocketQueue, payload: dict) -> None:
+    # shortcut: bound each local client's backlog, add replay if clients need
+    # delivery guarantees after lagging or reconnecting.
+    if queue.full():
+        queue.get_nowait()
+    queue.put_nowait(payload)
+
+
+async def _serve_socket(ws: WebSocket, queue: SocketQueue, read: Callable[[], Awaitable[None]]) -> None:
+    async with anyio.create_task_group() as group:
+        async def write() -> None:
+            try:
+                while True:
+                    payload = await queue.get()
+                    with anyio.fail_after(2.0):
+                        await ws.send_json(payload)
+            except WebSocketDisconnect:
+                pass
+            except TimeoutError:
+                await ws.close(code=1013)
+            finally:
+                group.cancel_scope.cancel()
+
+        group.start_soon(write)
+        await read()
+        group.cancel_scope.cancel()
+
+
+def create_app(
+    session_factory: Callable[[], Session] = Session,
+    *,
+    frontend_dir: Path = FRONTEND_DIST,
+) -> FastAPI:
+    dashboards: set[SocketQueue] = set()
+    phones: dict[str, SocketQueue] = {}
+
+    def broadcast(payload: dict) -> None:
+        for queue in dashboards:
+            _enqueue(queue, payload)
+
+    def push_status(session: Session, phone_id: str) -> None:
+        if phone_id in phones:
+            _enqueue(phones[phone_id], session.phone_status(phone_id))
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        session = app.state.session = session_factory()
+        session.log_backends()
+        processor = Processor(
+            session, broadcast, min_phones=2 if os.getenv("ASCS_DIAGNOSTIC_TWO_PHONE") == "1" else 3,
+        )
+        async with asyncio.TaskGroup() as group:
+            tasks = (group.create_task(processor.run()), group.create_task(processor.run_telemetry()))
+            try:
+                yield
+            finally:
+                for task in tasks:
+                    task.cancel()
+
+    app = FastAPI(title="ASCS Sound Swarm", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["http://localhost:5173"],
+        allow_methods=["*"], allow_headers=["*"],
+    )
+
+    @app.get("/api/health")
+    async def health(request: Request):
+        session: Session = request.app.state.session
+        return {
+            "status": "ok",
+            "phones_connected": len(session.active_phones()),
+            "synced_phones": len(session.synced_phones()),
+            "classifier_backend": session.classifier.backend_name,
+        }
+
+    @app.get("/api/session")
+    async def get_session(request: Request):
+        return request.app.state.session.snapshot()
+
+    @app.put("/api/room")
+    async def put_room(room: RoomConfig, request: Request):
+        session: Session = request.app.state.session
+        if not _inside(room, room.speaker_x_m, room.speaker_y_m):
+            raise HTTPException(422, "Speaker coordinates must be inside the room")
+        if any(not _inside(room, p.x_m, p.y_m) for p in session.phones.values()):
+            raise HTTPException(422, "Phone coordinates must be inside the room")
+        session.update_room(room)
+        broadcast(session.snapshot())
+        for phone_id in phones:
+            push_status(session, phone_id)
+        return session.room
+
+    @app.put("/api/phones/{phone_id}")
+    async def put_phone(phone_id: str, position: Position, request: Request):
+        session: Session = request.app.state.session
+        if not _inside(session.room, position.x_m, position.y_m):
+            raise HTTPException(422, "Phone coordinates must be inside the room")
+        phone = session.set_phone(phone_id, **position.model_dump(exclude_none=True))
+        broadcast(session.snapshot())
+        push_status(session, phone_id)
+        return phone
+
+    @app.delete("/api/phones/{phone_id}", status_code=204)
+    async def delete_phone(phone_id: str, request: Request):
+        session: Session = request.app.state.session
+        phone = session.phones.get(phone_id)
+        if phone is None:
+            raise HTTPException(404, "Unknown phone")
+        if phone.connected:
+            raise HTTPException(409, "Disconnect the phone before removing it")
+        del session.phones[phone_id]
+        broadcast(session.snapshot())
+
+    @app.post("/api/calibrate/arm")
+    async def arm_calibration(body: CalibrateArm, request: Request):
+        session: Session = request.app.state.session
+        try:
+            run = session.arm(body.mode)
+        except CalibrationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        broadcast(session.snapshot())
+        return run.response()
+
+    @app.post("/api/calibrate/solve")
+    async def solve_calibration(body: CalibrateSolve, request: Request):
+        session: Session = request.app.state.session
+        revision = session.revision
+        try:
+            result = await session.solve(body.calibration_id, body.mode, body.window_s)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except CalibrationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        payload = {"type": "calibration_result", **result.model_dump(mode="json")}
+        if session.revision != revision:
+            broadcast(payload)
+            broadcast(session.snapshot())
+            for phone_id in phones:
+                push_status(session, phone_id)
+        return payload
+
+    @app.get("/api/eval/trials")
+    async def get_trials(request: Request):
+        judge = request.app.state.session.judge
+        return {"trials": judge.trials, "summary": judge.summary()}
+
+    @app.post("/api/eval/trials")
+    async def post_trial(body: NewTrial, request: Request):
+        session: Session = request.app.state.session
+        event = None
+        if body.event_id is not None:
+            event = session.detections.get(body.event_id)
+            if event is None:
+                raise HTTPException(404, "Detection is no longer available")
+        return session.judge.add_trial(body.label, body.gt_x_m, body.gt_y_m, body.expected_class, event)
+
+    @app.delete("/api/eval/trials", status_code=204)
+    async def delete_trials(request: Request):
+        request.app.state.session.judge.clear()
+
+    @app.get("/api/eval/export.csv")
+    async def export_csv(request: Request):
+        return Response(
+            request.app.state.session.judge.export_csv(), media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="judge-eval.csv"'},
+        )
+
+    @app.get("/api/join-info")
+    async def join_info(request: Request):
+        base = os.getenv("PUBLIC_BASE_URL") or str(request.base_url)
+        join_url = f"{base.rstrip('/')}/phone.html"
+        svg = BytesIO()
+        segno.make_qr(join_url).save(svg, kind="svg", scale=4, xmldecl=False, light="white")
+        return {"join_url": join_url, "qr_svg": svg.getvalue().decode("utf-8")}
+
+    @app.websocket("/ws/dashboard")
+    async def dashboard_socket(ws: WebSocket):
+        await ws.accept()
+        session: Session = ws.app.state.session
+        queue: SocketQueue = asyncio.Queue(maxsize=32)
+        queue.put_nowait(session.snapshot())
+        dashboards.add(queue)
+
+        async def read() -> None:
+            while (await ws.receive())["type"] != "websocket.disconnect":
+                pass
+
+        try:
+            await _serve_socket(ws, queue, read)
+        finally:
+            dashboards.discard(queue)
+
+    @app.websocket("/ws/phone/{phone_id}")
+    async def phone_socket(ws: WebSocket, phone_id: str):
+        await ws.accept()
+        if phone_id in phones:
+            await ws.close(code=1008, reason="Phone ID is already connected")
+            return
+        session: Session = ws.app.state.session
+        queue: SocketQueue = asyncio.Queue(maxsize=32)
+        session.connect(phone_id)
+        phones[phone_id] = queue
+        broadcast(session.snapshot())
+
+        async def read() -> None:
+            while True:
+                message = await ws.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                binary, raw_text = message.get("bytes"), message.get("text")
+                if binary is not None:
+                    try:
+                        frame = decode_audio_frame(binary)
+                    except ValueError:
+                        continue
+                    if session.ingest(phone_id, frame):
+                        push_status(session, phone_id)
+                        broadcast(session.snapshot())
+                elif raw_text is not None:
+                    try:
+                        hello = PhoneHello.model_validate_json(raw_text)
+                    except ValidationError:
+                        continue
+                    if hello.phone_id != phone_id or not _inside(session.room, hello.x_m, hello.y_m):
+                        continue
+                    fields = hello.model_dump(exclude={"type", "phone_id", "sample_rate"}, exclude_none=True)
+                    if session.buffers[phone_id].latest_sample_index == 0:
+                        fields["sample_rate"] = hello.sample_rate
+                    session.set_phone(phone_id, **fields)
+                    push_status(session, phone_id)
+                    broadcast(session.snapshot())
+
+        try:
+            await _serve_socket(ws, queue, read)
+        finally:
+            del phones[phone_id]
+            session.disconnect(phone_id)
+            broadcast(session.snapshot())
+
+    if frontend_dir.is_dir():
+        app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
+    return app
+
+
+app = create_app()

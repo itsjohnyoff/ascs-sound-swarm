@@ -9,6 +9,7 @@ description = "Audience smartphone acoustic array for sub-ms synchronized 2D sou
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
+    "anyio>=3.6.2",
     "uvicorn[standard]>=0.32.0",
     "pydantic>=2.9.0",
     "numpy>=1.26.0",
@@ -39,3 +40,7 @@ ggwave = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["backend", "backend.*", "shared"]
+namespaces = false
