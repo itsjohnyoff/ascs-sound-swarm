@@ -1,0 +1,215 @@
+"""Event-driven detection (CONTRACTS 4).
+
+Per-phone onsets -> global time -> group (>= 3 phones within room diagonal / c + 5 ms)
+-> wait for playout slack -> one window -> one localize + one classify -> one detection.
+
+`EventGrouper`, `decide_kind` and `extract_event` are pure so the live loop, the spike
+analysis and the benchmark all run the exact same logic.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from shared.protocol import (
+    CHIRP_DURATION_S,
+    CHIRP_SUPPRESS_S,
+    EVENT_WINDOW_POST_S,
+    EVENT_WINDOW_PRE_S,
+    PLAYOUT_SLACK_S,
+    SUSTAINED_WINDOW_S,
+    EventKind,
+    LocalizationResult,
+    PhoneAudioSlice,
+    PhoneConfig,
+    RoomConfig,
+    speed_of_sound,
+)
+
+TARGET_FS = 48000
+SUSTAIN_CHECK_S = 0.25        # energy still high this long after onset -> sustained
+SUSTAIN_THRESHOLD_DB = 10.0
+SUSTAIN_REEMIT_S = 0.5
+SUSTAIN_MAX_UPDATES = 20      # shortcut: cap drone re-emits at ~10 s, raise if judges play longer
+FRAME = 2048
+
+
+def max_spread_s(room: RoomConfig) -> float:
+    return math.hypot(room.width_m, room.height_m) / speed_of_sound(room.temperature_c) + 0.005
+
+
+@dataclass
+class PendingEvent:
+    t0: float
+    onsets: dict[str, float] = field(default_factory=dict)
+
+
+class EventGrouper:
+    """Group per-phone global onset times into events."""
+
+    def __init__(self, max_spread_s: float, min_phones: int = 3) -> None:
+        self.max_spread_s = max_spread_s
+        self.min_phones = min_phones
+        self.pending: list[PendingEvent] = []
+        self._recent: list[PendingEvent] = []  # emitted, absorbs late onsets of the same sound
+        self.hold_until = -math.inf  # a sustained sound is still playing until this global time
+
+    def add(self, phone_id: str, t: float) -> None:
+        if t < self.hold_until:
+            return
+        for ev in self._recent + self.pending:
+            if abs(t - ev.t0) <= self.max_spread_s and phone_id not in ev.onsets:
+                ev.onsets[phone_id] = t
+                ev.t0 = min(ev.t0, t)
+                return
+            if abs(t - ev.t0) <= self.max_spread_s and ev in self._recent:
+                return
+        self.pending.append(PendingEvent(t, {phone_id: t}))
+
+    def hold(self, until: float) -> None:
+        """Ignore onsets (and drop pending clusters) until a sustained sound has ended."""
+        self.hold_until = max(self.hold_until, until)
+        self.pending = [ev for ev in self.pending if ev.t0 >= self.hold_until]
+
+    def pop_ready(self, buffered_until: Callable[[str], float | None], slack_s: float = PLAYOUT_SLACK_S
+                  ) -> list[PendingEvent]:
+        ready, keep = [], []
+        for ev in self.pending:
+            passed = all((buffered_until(pid) or -math.inf) >= ev.t0 + slack_s for pid in ev.onsets)
+            if passed and len(ev.onsets) >= self.min_phones:
+                ready.append(ev)
+            elif not passed:
+                keep.append(ev)
+        self.pending = keep
+        self._recent = [ev for ev in self._recent + ready
+                        if ready and ev.t0 >= max(r.t0 for r in ready) - 5.0] or self._recent
+        return sorted(ready, key=lambda e: e.t0)
+
+
+def _rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(x, dtype=np.float64)))) if len(x) else 0.0
+
+
+def decide_kind(engine, slices: dict[str, PhoneAudioSlice], t0: float, fs: int = TARGET_FS) -> EventKind | None:
+    """Transient unless energy 250 ms after onset is still > 10 dB above the pre-onset floor."""
+    aligned = engine.extract_aligned_window(slices, t0 - 0.12, t0 + SUSTAIN_CHECK_S + 0.05, target_fs=fs)
+    if not aligned:
+        return None
+    ratios = []
+    for x in aligned.values():
+        noise = _rms(x[: int(0.1 * fs)])
+        late = _rms(x[int((0.12 + SUSTAIN_CHECK_S) * fs):])
+        ratios.append(20 * math.log10(max(late, 1e-9) / max(noise, 1e-9)))
+    return "sustained" if float(np.median(ratios)) > SUSTAIN_THRESHOLD_DB else "transient"
+
+
+def event_window(t0: float, kind: EventKind, update_seq: int = 0) -> tuple[float, float]:
+    if kind == "transient":
+        return t0 - EVENT_WINDOW_PRE_S, t0 + EVENT_WINDOW_POST_S
+    start = t0 + update_seq * SUSTAIN_REEMIT_S
+    return start, start + SUSTAINED_WINDOW_S
+
+
+def extract_event(engine, slices: dict[str, PhoneAudioSlice], t0: float, kind: EventKind, update_seq: int = 0,
+                  fs: int = TARGET_FS) -> dict[str, np.ndarray]:
+    """Aligned window per phone. Phones with a gap or clipping in the window are dropped."""
+    lo, hi = event_window(t0, kind, update_seq)
+    aligned = engine.extract_aligned_window(slices, lo, hi, target_fs=fs)  # already drops gap phones
+    return {pid: x for pid, x in aligned.items() if float(np.max(np.abs(x), initial=0.0)) < 0.99}
+
+
+def still_sustained(engine, slices, t0: float, update_seq: int, fs: int = TARGET_FS) -> bool:
+    lo, hi = event_window(t0, "sustained", update_seq)
+    pre = engine.extract_aligned_window(slices, t0 - 0.12, t0 - 0.02, target_fs=fs)
+    cur = engine.extract_aligned_window(slices, hi - 0.25, hi, target_fs=fs)
+    common = set(pre) & set(cur)
+    if not common:
+        return False
+    ratios = [20 * math.log10(max(_rms(cur[p]), 1e-9) / max(_rms(pre[p]), 1e-9)) for p in common]
+    return float(np.median(ratios)) > SUSTAIN_THRESHOLD_DB
+
+
+def sustained_hold_until(t0: float, last_seq: int) -> float:
+    # shortcut: a new sound within 0.5 s after a drone's last window is ignored; split
+    # by onset energy if judges play claps over drones.
+    return event_window(t0, "sustained", last_seq)[1] + SUSTAIN_REEMIT_S
+
+
+# ---------------------------------------------------------------------------
+# Offline: same logic over whole recordings (spike analysis, benchmark)
+# ---------------------------------------------------------------------------
+@dataclass
+class OfflineDetection:
+    t0: float
+    kind: EventKind
+    onsets: dict[str, float]
+    result: LocalizationResult | None
+    aligned: dict[str, np.ndarray]
+
+
+def chirp_suppression(engine) -> dict[str, list[tuple[float, float]]]:
+    """Local sample ranges around every chirp each phone heard."""
+    out: dict[str, list[tuple[float, float]]] = {}
+    fitter = getattr(engine, "_v2_fitter", None)
+    for em in getattr(fitter, "emissions", []):
+        for pid, obs in em.obs_by_phone.items():
+            pad = CHIRP_SUPPRESS_S * obs.sample_rate
+            out.setdefault(pid, []).append(
+                (obs.sample_index - pad, obs.sample_index + CHIRP_DURATION_S * obs.sample_rate + pad))
+    return out
+
+
+def find_events_offline(slices: dict[str, PhoneAudioSlice], phones: dict[str, PhoneConfig], room: RoomConfig,
+                        *, engine=None, localizer=None, min_phones: int = 3) -> list[OfflineDetection]:
+    from backend.dsp.pipeline import LocalizationPipeline, OnsetDetector, SyncEngine
+
+    if engine is None:
+        engine = SyncEngine()
+        engine.add_chirp_observation(slices, phones, room, "lfm_single")
+    localizer = localizer or LocalizationPipeline()
+    suppress = chirp_suppression(engine)
+    onsets: list[tuple[float, str]] = []
+    for pid, s in slices.items():
+        if not engine.is_synced(pid):
+            continue
+        det = OnsetDetector()
+        for k in range(0, len(s.samples_f32), FRAME):
+            mask = None if s.valid_mask is None else s.valid_mask[k:k + FRAME]
+            for n in det.push(s.samples_f32[k:k + FRAME], s.start_sample_index + k, s.sample_rate, mask):
+                if any(a <= n <= b for a, b in suppress.get(pid, [])):
+                    continue
+                t = engine.to_global(pid, n)
+                if t is not None:
+                    onsets.append((t, pid))
+    grouper = EventGrouper(max_spread_s(room), min_phones)
+    ends = {pid: engine.to_global(pid, s.start_sample_index + len(s.samples_f32) - 1) for pid, s in slices.items()}
+    data_end = min(t for t in ends.values() if t is not None)
+    out: list[OfflineDetection] = []
+
+    def drain(horizon: float) -> None:
+        for ev in grouper.pop_ready(lambda pid: horizon, slack_s=PLAYOUT_SLACK_S):
+            kind = decide_kind(engine, slices, ev.t0)
+            if kind is None:
+                continue
+            aligned = extract_event(engine, slices, ev.t0, kind)
+            result = None
+            if len(aligned) >= min_phones:
+                result = localizer.localize(aligned, {p: phones[p] for p in aligned}, room, kind, fs=TARGET_FS)
+            out.append(OfflineDetection(ev.t0, kind, dict(ev.onsets), result, aligned))
+            if kind == "sustained":
+                seq = 1
+                while (seq < SUSTAIN_MAX_UPDATES and event_window(ev.t0, kind, seq)[1] <= data_end
+                       and still_sustained(engine, slices, ev.t0, seq)):
+                    seq += 1
+                grouper.hold(sustained_hold_until(ev.t0, seq - 1))
+
+    # Replay onsets in time order so holds and slack behave exactly as live.
+    for t, pid in sorted(onsets):
+        drain(t)
+        grouper.add(pid, t)
+    drain(math.inf)
+    return out
