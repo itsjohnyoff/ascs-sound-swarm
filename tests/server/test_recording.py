@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from backend.dsp.chirp import generate_lfm_chirp
 from backend.dsp.replay import load_recording_npz
 from backend.server.app import create_app
+from backend.server.audio_buffer import BUFFER_DURATION_S
 from backend.server.session import Session
 from shared.protocol import FLAG_CLOCK_JUMP, encode_audio_frame, speed_of_sound
 
@@ -71,9 +72,9 @@ def test_recording_archives_clock_epochs_and_ignores_retransmissions(tmp_path):
 
 def test_gate0_cli_replays_three_chirps_from_capture_longer_than_ring(tmp_path):
     session = Session()
-    capture_s = 33
+    capture_s = BUFFER_DURATION_S + 5
     gap_size = 2048
-    chirps_s = [0.8, 16.0, 31.0]
+    chirps_s = [0.8, 16.0, capture_s - 2.0]
     specs = [("iphone", 44100, 0.5, -0.21, 38.0), ("android", 48000, 7.5, 0.145, -26.0)]
     with TestClient(create_app(lambda: session, recordings_dir=tmp_path)) as client, ExitStack() as stack:
         assert client.post("/api/record/start").status_code == 200
@@ -93,7 +94,7 @@ def test_gate0_cli_replays_three_chirps_from_capture_longer_than_ring(tmp_path):
                     continue
                 phone.send_bytes(encode_audio_frame(signal[start:start + gap_size], seq, fs, 10_000 + start))
             send_hello(phone, pid, fs=fs, x=x)
-            assert session.buffers[pid].get_recent_slice(99).samples_f32.size < 30 * fs
+            assert session.buffers[pid].get_recent_slice(99).samples_f32.size <= BUFFER_DURATION_S * fs < capture_s * fs
 
         response = client.post("/api/record/stop")
         assert response.status_code == 200, response.text

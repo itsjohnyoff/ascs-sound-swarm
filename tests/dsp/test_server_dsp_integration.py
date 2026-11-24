@@ -1,4 +1,4 @@
-"""End-to-end integration tests driving Denis's real Server (Session, Processor, App) with Person 2's real DSP."""
+"""End-to-end integration tests driving Denis's real Server (Session, EventLoop, App) with Person 2's real DSP."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from scipy.ndimage import map_coordinates
 from backend.dsp.chirp import generate_dual_chirp, generate_lfm_chirp
 from backend.dsp.pipeline import LocalizationPipeline, SyncEngine
 from backend.server.app import create_app
-from backend.server.processor import Processor
+from backend.server.events import EventLoop
 from backend.server.session import Session
 from shared.protocol import (
     FLAG_CLOCK_JUMP,
@@ -155,9 +155,9 @@ def test_end_to_end_binary_frames_dual_chirp_sync_and_clap_localization() -> Non
         assert cal.max_residual_ms is not None and cal.max_residual_ms < 0.25
         assert all(session.phones[pid].sync_state == "synced" for pid, *_ in specs)
 
-        # 3. Stream post-calibration frames through global t = 8.4 s containing the clap and run real Processor
+        # 3. Stream post-calibration frames through global t = 8.4 s containing the clap and run the real EventLoop
         sent: list[dict] = []
-        processor = Processor(session, sent.append)
+        processor = EventLoop(session, sent.append)
         for pid, (rec, fs_phone, base_idx, _) in phone_streams.items():
             pos, seq = cursors[pid]
             _stream_slice_as_binary_frames(
@@ -165,6 +165,7 @@ def test_end_to_end_binary_frames_dual_chirp_sync_and_clap_localization() -> Non
             )
 
         await processor.process_once()
+        sent = [m for m in sent if m["type"] == "detection"]
         assert len(sent) == 1
         det = sent[0]
         assert det["type"] == "detection"
@@ -245,7 +246,8 @@ def test_end_to_end_fastapi_ws_calibration_and_clock_jump() -> None:
             assert _receive_type(ws_ne, "phone_status")["synced"] is True
             assert client.get("/api/health").json()["synced_phones"] == 2
 
-            # Clock jump on nw drops synced count to 1 immediately
+            # Clock jump on the reference phone: v2 re-references, but one phone alone has no
+            # shared timeline, so nothing stays synced (CONTRACTS 2).
             ws_nw.send_bytes(
                 encode_audio_frame(
                     np.zeros(2048, dtype=np.float32),
@@ -257,4 +259,5 @@ def test_end_to_end_fastapi_ws_calibration_and_clock_jump() -> None:
             )
             status = _receive_type(ws_nw, "phone_status")
             assert status["synced"] is False and status["state"] == "clock_jump"
-            assert client.get("/api/health").json()["synced_phones"] == 1
+            assert client.get("/api/health").json()["synced_phones"] == 0
+            assert client.get("/api/session").json()["phones"][1]["sync_state"] == "unsynced"

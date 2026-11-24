@@ -115,11 +115,12 @@ def event_window(t0: float, kind: EventKind, update_seq: int = 0) -> tuple[float
 
 
 def extract_event(engine, slices: dict[str, PhoneAudioSlice], t0: float, kind: EventKind, update_seq: int = 0,
-                  fs: int = TARGET_FS) -> dict[str, np.ndarray]:
-    """Aligned window per phone. Phones with a gap or clipping in the window are dropped."""
+                  fs: int = TARGET_FS, min_phones: int = 3) -> dict[str, np.ndarray]:
+    """Aligned window per phone. Gap phones are dropped; clipped phones too while >= min_phones remain."""
     lo, hi = event_window(t0, kind, update_seq)
     aligned = engine.extract_aligned_window(slices, lo, hi, target_fs=fs)  # already drops gap phones
-    return {pid: x for pid, x in aligned.items() if float(np.max(np.abs(x), initial=0.0)) < 0.99}
+    clean = {pid: x for pid, x in aligned.items() if float(np.max(np.abs(x), initial=0.0)) < 0.99}
+    return clean if len(clean) >= min_phones else aligned
 
 
 def still_sustained(engine, slices, t0: float, update_seq: int, fs: int = TARGET_FS) -> bool:
@@ -195,7 +196,7 @@ def find_events_offline(slices: dict[str, PhoneAudioSlice], phones: dict[str, Ph
             kind = decide_kind(engine, slices, ev.t0)
             if kind is None:
                 continue
-            aligned = extract_event(engine, slices, ev.t0, kind)
+            aligned = extract_event(engine, slices, ev.t0, kind, min_phones=min_phones)
             result = None
             if len(aligned) >= min_phones:
                 result = localizer.localize(aligned, {p: phones[p] for p in aligned}, room, kind, fs=TARGET_FS)
@@ -213,3 +214,142 @@ def find_events_offline(slices: dict[str, PhoneAudioSlice], phones: dict[str, Ph
         grouper.add(pid, t)
     drain(math.inf)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Live loop
+# ---------------------------------------------------------------------------
+PROCESS_INTERVAL_S = 0.05
+TELEMETRY_INTERVAL_S = 0.1
+LIVE_SLICE_S = 4.0
+
+
+@dataclass
+class _Sustained:
+    event_id: str
+    t0: float
+    phones_used: set[str]
+    seq: int = 0
+
+
+class EventLoop:
+    """Turns ingested onsets into detections on the asyncio loop; DSP runs in a worker thread."""
+
+    def __init__(self, session, broadcast: Callable[[dict], None], *, min_phones: int = 3) -> None:
+        self.session = session
+        self.broadcast = broadcast
+        self.min_phones = min_phones
+        self.grouper = EventGrouper(max_spread_s(session.room), min_phones)
+        self._epoch = -1
+        self._counter = 0
+        self._sustained: _Sustained | None = None
+
+    async def run(self) -> None:
+        import asyncio
+        import logging
+
+        while True:
+            try:
+                await self.process_once()
+            except Exception:
+                logging.getLogger(__name__).exception("Event processing failed")
+            await asyncio.sleep(PROCESS_INTERVAL_S)
+
+    async def run_telemetry(self) -> None:
+        import asyncio
+
+        while True:
+            await asyncio.sleep(TELEMETRY_INTERVAL_S)
+            self.broadcast(self.session.telemetry())
+
+    def _collect_onsets(self, engine) -> None:
+        s = self.session
+        armed = s.calibration is not None and s.calibration.result is None
+        for pid, pending in s.onsets.items():
+            local, s.onsets[pid] = pending, []
+            if armed or not engine.is_synced(pid) or pid not in s.buffers:
+                continue
+            fs = s.buffers[pid].sample_rate
+            cutoff = s.calibration_ends.get(pid, -math.inf) + CHIRP_SUPPRESS_S * fs
+            for n in local:
+                t = engine.to_global(pid, n) if n >= cutoff else None
+                if t is not None:
+                    self.grouper.add(pid, t)
+
+    async def process_once(self) -> None:
+        import asyncio
+        import time
+
+        s = self.session
+        if s.clock_epoch != self._epoch:  # new calibration: old onsets live on an old timeline
+            self._epoch = s.clock_epoch
+            self.grouper = EventGrouper(max_spread_s(s.room), self.min_phones)
+            self._sustained = None
+        engine = s.sync_engine
+        self._collect_onsets(engine)
+        synced = s.synced_phones()
+        if len(synced) < self.min_phones:
+            return
+
+        def buffered_until(pid: str) -> float | None:
+            buf = s.buffers.get(pid)
+            return None if buf is None else engine.to_global(pid, buf.latest_sample_index)
+
+        jobs: list[tuple[str, float, EventKind | None, int, set[str]]] = []
+        sus = self._sustained
+        if sus is not None:
+            end = event_window(sus.t0, "sustained", sus.seq + 1)[1]
+            if all((buffered_until(p) or -math.inf) >= end for p in sus.phones_used if p in s.buffers):
+                jobs.append((sus.event_id, sus.t0, "sustained", sus.seq + 1, sus.phones_used))
+        for ev in self.grouper.pop_ready(buffered_until):
+            self._counter += 1
+            jobs.append((f"evt-{self._counter:04d}", ev.t0, None, 0, set(synced)))
+        if not jobs:
+            return
+
+        slices = {pid: s.buffers[pid].get_recent_slice(LIVE_SLICE_S) for pid in synced if pid in s.buffers}
+        room, phones = s.room, dict(synced)
+
+        def analyze(event_id, t0, kind, seq, pids):
+            sub = {p: slices[p] for p in pids if p in slices}
+            if kind == "sustained" and seq > 0 and not still_sustained(engine, sub, t0, seq):
+                return event_id, t0, kind, seq, None
+            if kind is None:
+                kind = decide_kind(engine, sub, t0)
+                if kind is None:
+                    return event_id, t0, kind, seq, None
+                if kind == "sustained":  # need the full 0.75 s: re-queue as a sustained job
+                    return event_id, t0, kind, -1, None
+            aligned = extract_event(engine, sub, t0, kind, seq, min_phones=self.min_phones)
+            if len(aligned) < self.min_phones:
+                return event_id, t0, kind, seq, None
+            used = {p: phones[p] for p in aligned}
+            result = s.localizer.localize(aligned, used, room, kind, fs=TARGET_FS)
+            if result is None:
+                return event_id, t0, kind, seq, None
+            cls = s.classifier.classify_swarm(aligned, fs=TARGET_FS)
+            return event_id, t0, kind, seq, result.model_copy(update={
+                "event_id": event_id, "timestamp_s": time.time(), "update_seq": seq, "kind": kind,
+                "sound_class": cls.sound_class, "is_drone": cls.is_drone,
+                "class_confidence": cls.confidence, "class_probs": cls.probs,
+            })
+
+        for job in jobs:
+            event_id, t0, kind, seq, result = await asyncio.to_thread(analyze, *job)
+            if s.clock_epoch != self._epoch:  # recalibrated meanwhile: drop stale results
+                return
+            if kind == "sustained":
+                if seq == -1:  # decided sustained, emit seq 0 once 0.75 s is buffered
+                    self._sustained = _Sustained(event_id, t0, set(job[4]), seq=-1)
+                    self.grouper.hold(sustained_hold_until(t0, 0))
+                    continue
+                if result is None:
+                    self._sustained = None
+                    continue
+                self._sustained = _Sustained(event_id, t0, set(result.phones_used), seq)
+                self.grouper.hold(sustained_hold_until(t0, seq))
+                if seq + 1 >= SUSTAIN_MAX_UPDATES:
+                    self._sustained = None
+            if result is not None:
+                s.record_detection(result)
+                self.broadcast({"type": "detection", **result.model_dump(mode="json")})

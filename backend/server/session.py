@@ -16,6 +16,12 @@ import numpy as np
 from backend.server.audio_buffer import BUFFER_DURATION_S, PhoneRingBuffer
 from backend.server.judge_eval import JudgeEval
 from backend.server.recording import Recording
+from backend.server.stubs import (
+    StubLocalizationPipeline,
+    StubOnsetDetector,
+    StubSoundClassifier,
+    StubSyncEngine,
+)
 from shared.protocol import (
     FLAG_CLOCK_JUMP,
     CalibrationMode,
@@ -43,46 +49,18 @@ def compute_gdop_warning(phones: Iterable[PhoneConfig]) -> str | None:
     return None
 
 
-class StubSyncEngine:
-    def calibrate_from_buffers(self, buffers, phones, room, mode):
-        return CalibrationResult(
-            mode=mode, success=False, synced_count=0,
-            per_phone={pid: PhoneSyncReport(synced=False, error="DSP module unavailable") for pid in phones},
-        )
-
-    def is_synced(self, phone_id: str) -> bool:
-        return False
-
-    def mark_clock_jump(self, phone_id: str) -> None:
-        pass
-
-
-class StubLocalizer:
-    def detect_and_localize(self, aligned_audio, phones, room, fs, timestamp_s):
-        return None
-
-
-class StubClassifier:
-    backend_name = "heuristic"
-
-    def classify_single(self, audio, fs=48000) -> ClassificationResult:
-        return ClassificationResult(
-            sound_class="other", is_drone=False, confidence=0.0,
-            probs={"drone": 0.0, "clap": 0.0, "other": 1.0},
-        )
-
-    def classify_swarm(self, aligned_audio, fs=48000) -> ClassificationResult:
-        return self.classify_single(None, fs)
-
-
-def _discover(module: str, name: str, fallback: type):
+def _discover_class(module: str, name: str, fallback: type) -> type:
     try:
         implementation = getattr(import_module(module), name, None)
     except ModuleNotFoundError as exc:
         if not exc.name or not (exc.name == module or module.startswith(exc.name + ".")):
             raise
         implementation = None
-    return (implementation or fallback)()
+    return implementation or fallback
+
+
+def _discover(module: str, name: str, fallback: type):
+    return _discover_class(module, name, fallback)()
 
 
 class CalibrationConflict(Exception):
@@ -121,11 +99,15 @@ class Session:
             "backend.dsp.pipeline", "SyncEngine", StubSyncEngine,
         )
         self.localizer = localizer if localizer is not None else _discover(
-            "backend.dsp.pipeline", "LocalizationPipeline", StubLocalizer,
+            "backend.dsp.pipeline", "LocalizationPipeline", StubLocalizationPipeline,
         )
         self.classifier = classifier if classifier is not None else _discover(
-            "backend.classifier.model", "SoundClassifier", StubClassifier,
+            "backend.classifier.model", "SoundClassifier", StubSoundClassifier,
         )
+        self.onset_detector_cls = _discover_class("backend.dsp.pipeline", "OnsetDetector", StubOnsetDetector)
+        self.onset_detectors: dict[str, object] = {}
+        self.onsets: dict[str, list[int]] = {}  # local onset sample indices not yet grouped
+        self.positioned: set[str] = set()  # phones whose position the server owns (CONTRACTS 5)
         self.revision = 0
         self.clock_epoch = 0
         self.calibration_ends: dict[str, int] = {}
@@ -134,8 +116,8 @@ class Session:
 
     def log_backends(self) -> None:
         logger.info(
-            "Transport backends: sync=%s, localization=%s, classifier=%s (%s)",
-            type(self.sync_engine).__name__, type(self.localizer).__name__,
+            "Transport backends: sync=%s, localization=%s, onsets=%s, classifier=%s (%s)",
+            type(self.sync_engine).__name__, type(self.localizer).__name__, self.onset_detector_cls.__name__,
             type(self.classifier).__name__, self.classifier.backend_name,
         )
 
@@ -165,6 +147,8 @@ class Session:
     def disconnect(self, phone_id: str) -> None:
         self.set_phone(phone_id, connected=False, rms=0.0)
         self.buffers.pop(phone_id, None)
+        self.onset_detectors.pop(phone_id, None)
+        self.onsets.pop(phone_id, None)
         if self.recording is not None:
             self.recording.disconnect(phone_id)
         if self.calibration is not None:
@@ -173,6 +157,10 @@ class Session:
 
     def _invalidate_clock(self, phone_id: str, state: SyncState) -> None:
         self.sync_engine.mark_clock_jump(phone_id)
+        # Losing the reference can unsync others too (v2 re-reference needs 2+ phones).
+        for pid, phone in self.phones.items():
+            if pid != phone_id and phone.sync_state in ("synced", "drifting") and not self.sync_engine.is_synced(pid):
+                self.phones[pid] = phone.model_copy(update={"sync_state": "unsynced", "residual_ms": None})
         self.calibration_ends.pop(phone_id, None)
         self.phones[phone_id] = self.phones[phone_id].model_copy(update={
             "sync_state": state, "residual_ms": None, "drift_ppm": None,
@@ -188,6 +176,8 @@ class Session:
     def _replace_buffer(self, phone_id: str, sample_rate: int) -> PhoneRingBuffer:
         buffer = PhoneRingBuffer(phone_id, sample_rate, self._clock_jump)
         self.buffers[phone_id] = buffer
+        self.onset_detectors[phone_id] = self.onset_detector_cls()
+        self.onsets[phone_id] = []
         return buffer
 
     def ingest(self, phone_id: str, frame: DecodedAudioFrame) -> bool:
@@ -206,7 +196,17 @@ class Session:
         )
         if self.recording is not None:
             self.recording.append(phone, frame)
+        detector = self.onset_detectors.get(phone_id)
+        if detector is not None:
+            self.onsets[phone_id].extend(detector.push(frame.samples_f32, frame.sample_index, frame.sample_rate))
         return rate_changed or bool(frame.flags & FLAG_CLOCK_JUMP)
+
+    def hello_position(self, phone_id: str, fields: dict) -> dict:
+        """Apply a phone_hello position only when the server has none (CONTRACTS 5)."""
+        if phone_id in self.positioned:
+            return {k: v for k, v in fields.items() if k not in ("x_m", "y_m")}
+        self.positioned.add(phone_id)
+        return fields
 
     def active_phones(self) -> dict[str, PhoneConfig]:
         return {pid: phone for pid, phone in self.phones.items() if phone.connected}
@@ -290,7 +290,8 @@ class Session:
         engine = deepcopy(self.sync_engine)
         self.solving = True
         try:
-            result = await asyncio.to_thread(engine.calibrate_from_buffers, slices, phones, room, mode)
+            solve = getattr(engine, "add_chirp_observation", None) or engine.calibrate_from_buffers
+            result = await asyncio.to_thread(solve, slices, phones, room, mode)
             if revision != self.revision:
                 raise CalibrationConflict("Session changed during calibration. Arm a new run and try again.")
 

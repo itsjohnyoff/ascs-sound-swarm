@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, FiniteFloat, ValidationError
 
 from backend.server.audio_buffer import BUFFER_DURATION_S, decode_audio_frame
-from backend.server.processor import Processor
+from backend.server.events import EventLoop
 from backend.server.recording import Recording
 from backend.server.session import CalibrationConflict, Session
 from shared.protocol import CalibrationMode, RoomConfig, SoundClass
@@ -119,7 +119,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         session = app.state.session = session_factory()
         session.log_backends()
-        processor = Processor(
+        processor = EventLoop(
             session, broadcast, min_phones=2 if os.getenv("ASCS_DIAGNOSTIC_TWO_PHONE") == "1" else 3,
         )
         async with asyncio.TaskGroup() as group:
@@ -171,6 +171,7 @@ def create_app(
         if not _inside(session.room, position.x_m, position.y_m):
             raise HTTPException(422, "Phone coordinates must be inside the room")
         phone = session.set_phone(phone_id, **position.model_dump(exclude_none=True))
+        session.positioned.add(phone_id)
         broadcast(session.snapshot())
         push_status(session, phone_id)
         return phone
@@ -351,7 +352,8 @@ def create_app(
                         continue
                     if hello.phone_id != phone_id or not _inside(session.room, hello.x_m, hello.y_m):
                         continue
-                    fields = hello.model_dump(exclude={"type", "phone_id", "sample_rate"}, exclude_none=True)
+                    fields = session.hello_position(phone_id, hello.model_dump(
+                        exclude={"type", "phone_id", "sample_rate"}, exclude_none=True))
                     if session.buffers[phone_id].latest_sample_index == 0:
                         fields["sample_rate"] = hello.sample_rate
                     session.set_phone(phone_id, **fields)
