@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from scipy.fft import irfft, next_fast_len, rfft, rfftfreq
 
 
 def _parabolic_peak_offset(y_m1: float, y_0: float, y_p1: float) -> float:
@@ -38,13 +39,15 @@ def compute_gcc_phat(
         return lags, corr, 0.0, 0.0
 
     n_lin = n_i + n_j - 1
-    n_fft = 1 << (n_lin - 1).bit_length()
+    n_fft = next_fast_len(n_lin)
+    if n_fft % 2 != 0:
+        n_fft += 1
 
-    xi = np.fft.rfft(sig_i.astype(np.float64), n=n_fft)
-    xj = np.fft.rfft(sig_j.astype(np.float64), n=n_fft)
+    xi = rfft(sig_i.astype(np.float64), n=n_fft)
+    xj = rfft(sig_j.astype(np.float64), n=n_fft)
     cross = xi * np.conj(xj)
 
-    freqs = np.fft.rfftfreq(n_fft, d=1.0 / float(fs))
+    freqs = rfftfreq(n_fft, d=1.0 / float(fs))
     hi_cut = min(f_max, 0.48 * fs)
     band_mask = (freqs >= f_min) & (freqs <= hi_cut)
 
@@ -59,7 +62,7 @@ def compute_gcc_phat(
     weighted = np.where(band_mask, cross / denom, 0.0 + 0.0j)
 
     n_out = n_fft * interp_factor
-    corr_full = np.fft.irfft(weighted, n=n_out) * interp_factor
+    corr_full = irfft(weighted, n=n_out) * interp_factor
 
     fs_interp = float(fs * interp_factor)
     max_lag_idx = min(int(math.ceil(max_tau_s * fs_interp)), n_out // 2 - 1)
