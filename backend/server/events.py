@@ -79,14 +79,16 @@ class EventGrouper:
                   ) -> list[PendingEvent]:
         ready, keep = [], []
         for ev in self.pending:
-            passed = all((buffered_until(pid) or -math.inf) >= ev.t0 + slack_s for pid in ev.onsets)
+            ends = [buffered_until(pid) for pid in ev.onsets]
+            passed = all(t is not None and t >= ev.t0 + slack_s for t in ends)
             if passed and len(ev.onsets) >= self.min_phones:
                 ready.append(ev)
             elif not passed:
                 keep.append(ev)
         self.pending = keep
-        self._recent = [ev for ev in self._recent + ready
-                        if ready and ev.t0 >= max(r.t0 for r in ready) - 5.0] or self._recent
+        if ready:  # keep emitted events for 5 s so their late onsets are absorbed, not re-detected
+            newest = max(r.t0 for r in ready)
+            self._recent = [ev for ev in self._recent + ready if ev.t0 >= newest - 5.0]
         return sorted(ready, key=lambda e: e.t0)
 
 
@@ -301,7 +303,7 @@ class EventLoop:
         sus = self._sustained
         if sus is not None:
             end = event_window(sus.t0, "sustained", sus.seq + 1)[1]
-            if all((buffered_until(p) or -math.inf) >= end for p in sus.phones_used if p in s.buffers):
+            if all((buffered_until(p) is not None and buffered_until(p) >= end) for p in sus.phones_used if p in s.buffers):
                 jobs.append((sus.event_id, sus.t0, "sustained", sus.seq + 1, sus.phones_used))
         for ev in self.grouper.pop_ready(buffered_until):
             self._counter += 1

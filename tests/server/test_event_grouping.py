@@ -68,3 +68,10 @@ def test_onsets_inside_a_held_sustained_event_are_ignored():
     for pid in "abc":
         g.add(pid, 12.1)
     assert len(g.pending) == 1
+
+
+def test_buffered_time_of_zero_counts_as_buffered():
+    g = EventGrouper(max_spread_s=0.03, min_phones=3)
+    for pid in "abc":
+        g.add(pid, -0.5)
+    assert len(g.pop_ready(lambda pid: 0.0, slack_s=0.4)) == 1
