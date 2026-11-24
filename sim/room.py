@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import fftconvolve
 
+from backend.server.judge_eval import inside_hull
 from shared.protocol import RoomConfig, speed_of_sound
 from sim.sources import SRC_FS, render
 
@@ -156,16 +157,6 @@ def simulate(
     }
     arrays["meta"] = np.asarray(json.dumps(meta))
     return arrays
-
-
-def inside_hull(x: float, y: float, points: list[tuple[float, float]]) -> bool:
-    """Point inside the convex hull of points (inclusive)."""
-    if len(points) < 3:
-        return False
-    from scipy.spatial import ConvexHull
-
-    hull = ConvexHull(np.asarray(points, dtype=float))
-    return bool(np.all(hull.equations[:, :2] @ np.array([x, y]) + hull.equations[:, 2] <= 1e-9))
 
 
 def true_time(truth_phone: dict, sample_index: float) -> float:

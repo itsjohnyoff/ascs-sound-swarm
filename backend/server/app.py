@@ -281,7 +281,29 @@ def create_app(
             event = session.detections.get(body.event_id)
             if event is None:
                 raise HTTPException(404, "Detection is no longer available")
-        return session.judge.add_trial(body.label, body.gt_x_m, body.gt_y_m, body.expected_class, event)
+        return session.judge.add_trial(
+            body.label, body.gt_x_m, body.gt_y_m, body.expected_class, event, hull=session.phone_hull(),
+        )
+
+    @app.post("/api/eval/known-point")
+    async def post_known_point(body: NewTrial, request: Request):
+        session: Session = request.app.state.session
+        event = session.detections.get(body.event_id) if body.event_id is not None else None
+        if body.event_id is not None and event is None:
+            raise HTTPException(404, "Detection is no longer available")
+        return session.judge.add_trial(
+            body.label, body.gt_x_m, body.gt_y_m, body.expected_class, event,
+            hull=session.phone_hull(), known_point=True,
+        )
+
+    @app.get("/api/eval/known-point")
+    async def get_known_points(request: Request):
+        return {"checks": request.app.state.session.judge.known_points}
+
+    @app.get("/api/detections/recent")
+    async def recent_detections(request: Request, limit: int = 5):
+        detections = list(request.app.state.session.detections.values())[-limit:]
+        return {"detections": [d.model_dump(mode="json") for d in reversed(detections)]}
 
     @app.delete("/api/eval/trials", status_code=204)
     async def delete_trials(request: Request):

@@ -208,6 +208,9 @@ class Session:
         self.positioned.add(phone_id)
         return fields
 
+    def phone_hull(self) -> list[tuple[float, float]]:
+        return [(p.x_m, p.y_m) for p in self.phones.values() if p.connected]
+
     def active_phones(self) -> dict[str, PhoneConfig]:
         return {pid: phone for pid, phone in self.phones.items() if phone.connected}
 

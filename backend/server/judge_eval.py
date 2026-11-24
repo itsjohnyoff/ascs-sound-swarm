@@ -27,12 +27,27 @@ _CSV_COLUMNS = (
     "class_confidence",
     "residual_ms",
     "timestamp_s",
+    "inside_hull",
 )
+
+
+def inside_hull(x: float, y: float, points: list[tuple[float, float]]) -> bool:
+    """True when (x, y) is inside or on the convex hull of points (needs 3+ non-collinear)."""
+    if len(points) < 3:
+        return False
+    from scipy.spatial import ConvexHull, QhullError
+
+    try:
+        hull = ConvexHull(np.asarray(points, dtype=float))
+    except QhullError:
+        return False
+    return bool(np.all(hull.equations[:, :2] @ np.array([x, y]) + hull.equations[:, 2] <= 1e-9))
 
 
 class JudgeEval:
     def __init__(self) -> None:
         self.trials: list[EvalTrial] = []
+        self.known_points: list[EvalTrial] = []  # pre-run sanity checks, never in the score
 
     def add_trial(
         self,
@@ -41,9 +56,14 @@ class JudgeEval:
         gt_y_m: float,
         expected_class: SoundClass,
         event: LocalizationResult | None,
+        *,
+        hull: list[tuple[float, float]] | None = None,
+        known_point: bool = False,
     ) -> EvalTrial:
+        target = self.known_points if known_point else self.trials
         trial = EvalTrial(
-            trial_idx=len(self.trials) + 1,
+            trial_idx=len(target) + 1,
+            inside_hull=None if hull is None else inside_hull(gt_x_m, gt_y_m, hull),
             label=label,
             gt_x_m=gt_x_m,
             gt_y_m=gt_y_m,
@@ -57,7 +77,7 @@ class JudgeEval:
             residual_ms=event.residual_ms if event else None,
             timestamp_s=event.timestamp_s if event else time.time(),
         )
-        self.trials.append(trial)
+        target.append(trial)
         return trial
 
     def summary(self) -> EvalSummary:

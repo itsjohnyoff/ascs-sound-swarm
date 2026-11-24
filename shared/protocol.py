@@ -244,6 +244,7 @@ class EvalTrial(BaseModel):
     class_confidence: float | None = None
     residual_ms: float | None = None
     timestamp_s: float = 0.0
+    inside_hull: bool | None = None  # v2: ground truth inside the connected phones' convex hull
 
 
 class EvalSummary(BaseModel):
