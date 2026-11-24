@@ -70,6 +70,7 @@ class PhoneAudioSlice:
     samples_f32: np.ndarray  # contiguous 1D float32
     start_sample_index: int  # AudioWorklet sample_index of samples_f32[0]
     sample_rate: int
+    valid_mask: np.ndarray | None = None  # bool per sample; False denotes a zero-filled gap
 
 
 def encode_audio_frame(

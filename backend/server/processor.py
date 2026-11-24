@@ -78,6 +78,9 @@ class Processor:
             for pid, audio in buffers.items():
                 first = max(audio.start_sample_index, calibration_ends.get(pid, 0))
                 last = audio.start_sample_index + len(audio.samples_f32) - 1
+                if audio.valid_mask is not None and not audio.valid_mask.all():
+                    last_gap = int(np.flatnonzero(~audio.valid_mask)[-1])
+                    first = max(first, audio.start_sample_index + last_gap + 1)
                 if first < last:
                     ranges[pid] = (
                         engine.sample_to_global_time(pid, first),

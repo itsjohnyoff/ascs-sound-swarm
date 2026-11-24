@@ -222,12 +222,16 @@ def detect_chirp_arrivals(
     gap_s: float = DUAL_CHIRP_GAP_S,
     min_snr_db: float = 12.0,
     min_ncc: float = 0.25,
+    valid_mask: np.ndarray | None = None,
 ) -> tuple[list[float], float]:
     """Detect fractional chirp start sample indices inside samples_f32."""
     prep = _compute_chirp_envelope(samples_f32, fs=fs)
     if prep is None:
         return [], -100.0
     env, x_filt, _, sigma, tpl_len = prep
+    if valid_mask is not None and not valid_mask.all():
+        invalid_prefix = np.concatenate(([0], np.cumsum(~valid_mask)))
+        env = np.where(invalid_prefix[tpl_len:] == invalid_prefix[:-tpl_len], env, 0.0)
 
     p_a, snr_a = _pick_first_arrival(env, x_filt, tpl_len, fs, 0, len(env), sigma, min_snr_db, min_ncc)
     if p_a is None:
@@ -623,7 +627,9 @@ class SyncEngine:
                 per_phone[pid] = PhoneSyncReport(synced=False, error="No audio slice available; please recalibrate")
                 continue
 
-            arrivals, snr_db = detect_chirp_arrivals(slc.samples_f32, fs=slc.sample_rate, mode=mode)
+            arrivals, snr_db = detect_chirp_arrivals(
+                slc.samples_f32, fs=slc.sample_rate, mode=mode, valid_mask=slc.valid_mask,
+            )
             if not arrivals:
                 self.mark_clock_jump(pid)
                 per_phone[pid] = PhoneSyncReport(

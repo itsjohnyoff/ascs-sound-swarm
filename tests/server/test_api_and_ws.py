@@ -87,7 +87,9 @@ def test_binary_ingestion_telemetry_and_disconnect():
                     "phone_id": "nw", "rms": pytest.approx(0.25, abs=1e-4),
                     "connected": True, "sync_state": "unsynced", "dropped_frames": 1,
                 }]
-                assert session.buffers["nw"].get_recent_slice(1).start_sample_index == 1600
+                audio = session.buffers["nw"].get_recent_slice(1)
+                assert audio.start_sample_index == 0
+                np.testing.assert_array_equal(audio.valid_mask[800:1600], False)
                 assert client.delete("/api/phones/nw").status_code == 409
                 assert client.put("/api/phones/nw", json={"x_m": 2, "y_m": 1}).json()["label"] == "NW"
                 assert client.put("/api/phones/nw", json={"x_m": -1, "y_m": 1}).status_code == 422

@@ -99,7 +99,7 @@ def test_ring_wrap_preserves_exact_indices_and_snapshot():
     np.testing.assert_array_equal(all_recent.samples_f32, expected[-96_000:])
 
 
-def test_drops_count_once_and_snapshot_contains_only_contiguous_suffix():
+def test_drops_count_once_and_snapshot_zero_fills_every_gap():
     buffer = PhoneRingBuffer("phone-1", SAMPLE_RATE)
     assert buffer.append(make_frame(12, 100, [0.125] * 4))
 
@@ -114,11 +114,14 @@ def test_drops_count_once_and_snapshot_contains_only_contiguous_suffix():
 
     recent = buffer.get_recent_slice(1)
     assert buffer.dropped_frames == 3
-    assert recent.start_sample_index == 123
+    assert recent.start_sample_index == 100
     assert buffer.latest_sample_index == 126
-    np.testing.assert_array_equal(
-        recent.samples_f32, np.concatenate((second_after_gap.samples_f32, next_frame.samples_f32))
-    )
+    expected_valid = np.ones(26, dtype=bool)
+    expected_valid[4:12] = False
+    expected_valid[16:23] = False
+    np.testing.assert_array_equal(recent.valid_mask, expected_valid)
+    np.testing.assert_array_equal(recent.samples_f32[~expected_valid], 0)
+    np.testing.assert_array_equal(recent.samples_f32[23:], [0.5, 0.25, 0.125])
 
 
 def test_sequence_gap_with_contiguous_samples_keeps_both_frames():
@@ -197,3 +200,39 @@ def test_telemetry_uses_last_frame_rms_and_counts_clipped_frames():
     assert buffer.append(quiet)
     assert buffer.clipping_count == 1
     assert buffer.rms == pytest.approx(np.sqrt(np.mean(quiet.samples_f32 ** 2)))
+
+
+def test_gap_larger_than_ring_only_fills_retained_indices():
+    buffer = PhoneRingBuffer("phone-1", SAMPLE_RATE)
+    assert buffer.append(make_frame(0, 10, [0.25]))
+    next_index = 2**60 + 40
+    assert buffer.append(make_frame(1, next_index, [0.5, 0.125]))
+    snapshot = buffer.get_recent_slice(1)
+    assert snapshot.start_sample_index == next_index + 2 - SAMPLE_RATE
+    np.testing.assert_array_equal(snapshot.valid_mask[:-2], False)
+    np.testing.assert_array_equal(snapshot.samples_f32[:-2], 0)
+    np.testing.assert_array_equal(snapshot.valid_mask[-2:], True)
+    np.testing.assert_array_equal(snapshot.samples_f32[-2:], [0.5, 0.125])
+
+
+def test_live_calibration_accepts_gap_between_chirps_but_rejects_gap_inside_one():
+    from backend.dsp.chirp import generate_dual_chirp
+    from backend.dsp.sync import detect_chirp_arrivals
+
+    fs = 48000
+    samples = np.zeros(6 * fs, dtype=np.float32)
+    start = fs // 4
+    chirps = generate_dual_chirp(fs)
+    samples[start:start + len(chirps)] = chirps
+    mask = np.ones(len(samples), dtype=bool)
+    mask[fs:fs + 2048] = False
+
+    arrivals, _ = detect_chirp_arrivals(samples, fs, valid_mask=mask)
+    assert len(arrivals) == 2
+
+    gap = slice(start + int(0.03 * fs), start + int(0.12 * fs))
+    mask[gap] = False
+    samples[gap] = 0
+    arrivals, _ = detect_chirp_arrivals(samples, fs, valid_mask=mask)
+    assert len(arrivals) == 1
+    assert arrivals[0] == pytest.approx(start + 5 * fs, abs=2)
