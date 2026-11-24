@@ -40,15 +40,32 @@ def _parabolic_refine(arr: np.ndarray, idx: int) -> float:
     return float(idx) + delta
 
 
+def _local_template_ncc(
+    env: np.ndarray,
+    x_filt: np.ndarray,
+    idx: int,
+    tpl_len: int,
+) -> float:
+    """Normalized correlation magnitude against unit-norm chirp template at idx."""
+    seg = x_filt[idx : idx + tpl_len]
+    local_norm = float(np.linalg.norm(seg))
+    if local_norm <= 1e-12:
+        return 0.0
+    return float(env[idx]) / local_norm
+
+
 def _pick_first_arrival(
     env: np.ndarray,
+    x_filt: np.ndarray,
+    tpl_len: int,
     fs: int,
     start: int,
     end: int,
     sigma: float,
     min_snr_db: float,
+    min_ncc: float,
 ) -> tuple[float | None, float]:
-    """Locate earliest direct-path peak in env[start:end] preceding strong reflections."""
+    """Locate earliest direct-path peak in env[start:end] matching the chirp template."""
     start = max(0, start)
     end = min(len(env), end)
     if end - start < 3:
@@ -67,11 +84,14 @@ def _pick_first_arrival(
     win_start = max(start, i_max - lookback)
     sub = env[win_start : i_max + 1]
     peaks, _ = find_peaks(sub, height=0.55 * peak_val, distance=max(1, int(0.001 * fs)))
-    if len(peaks) > 0:
-        i_first = win_start + int(peaks[0])
-    else:
-        i_first = i_max
-    return _parabolic_refine(env, i_first), snr_db
+    for pk in peaks:
+        cand = win_start + int(pk)
+        if _local_template_ncc(env, x_filt, cand, tpl_len) >= min_ncc:
+            return _parabolic_refine(env, cand), snr_db
+
+    if _local_template_ncc(env, x_filt, i_max, tpl_len) >= min_ncc:
+        return _parabolic_refine(env, i_max), snr_db
+    return None, snr_db
 
 
 def detect_chirp_arrivals(
@@ -80,6 +100,7 @@ def detect_chirp_arrivals(
     mode: CalibrationMode = "lfm_dual",
     gap_s: float = DUAL_CHIRP_GAP_S,
     min_snr_db: float = 12.0,
+    min_ncc: float = 0.25,
 ) -> tuple[list[float], float]:
     """Detect fractional chirp start sample indices inside samples_f32."""
     tpl = generate_lfm_chirp(fs=fs).astype(np.float64)
@@ -100,7 +121,8 @@ def detect_chirp_arrivals(
     env = np.abs(hilbert(corr, N=n_fast)[: len(corr)])
 
     sigma = float(np.median(env)) / 1.17741 + 1e-12
-    p_a, snr_a = _pick_first_arrival(env, fs, 0, len(env), sigma, min_snr_db)
+    tpl_len = len(tpl)
+    p_a, snr_a = _pick_first_arrival(env, x_filt, tpl_len, fs, 0, len(env), sigma, min_snr_db, min_ncc)
     if p_a is None:
         return [], snr_a
 
@@ -113,11 +135,11 @@ def detect_chirp_arrivals(
 
     fwd_s = int(round(p_a)) + gap_n - tol
     fwd_e = int(round(p_a)) + gap_n + tol
-    p_fwd, snr_fwd = _pick_first_arrival(env, fs, fwd_s, fwd_e, sigma, partner_min_snr)
+    p_fwd, snr_fwd = _pick_first_arrival(env, x_filt, tpl_len, fs, fwd_s, fwd_e, sigma, partner_min_snr, min_ncc)
 
     bwd_s = int(round(p_a)) - gap_n - tol
     bwd_e = int(round(p_a)) - gap_n + tol
-    p_bwd, snr_bwd = _pick_first_arrival(env, fs, bwd_s, bwd_e, sigma, partner_min_snr)
+    p_bwd, snr_bwd = _pick_first_arrival(env, x_filt, tpl_len, fs, bwd_s, bwd_e, sigma, partner_min_snr, min_ncc)
 
     candidates: list[tuple[float, float]] = []
     if p_fwd is not None:
@@ -232,18 +254,31 @@ class SyncEngine:
         detected: dict[str, tuple[list[float], float, float, PhoneAudioSlice]] = {}
         per_phone: dict[str, PhoneSyncReport] = {}
 
+        requires_dual = mode in ("lfm_dual", "ggwave_hybrid")
+
         for pid, pcfg in phones.items():
             slc = phone_buffers.get(pid)
             if slc is None or len(slc.samples_f32) == 0:
-                per_phone[pid] = PhoneSyncReport(synced=False, error="No audio slice available")
+                self.mark_clock_jump(pid)
+                per_phone[pid] = PhoneSyncReport(synced=False, error="No audio slice available; please recalibrate")
                 continue
 
             arrivals, snr_db = detect_chirp_arrivals(slc.samples_f32, fs=slc.sample_rate, mode=mode)
             if not arrivals:
+                self.mark_clock_jump(pid)
                 per_phone[pid] = PhoneSyncReport(
                     synced=False,
                     chirp_snr_db=round(snr_db, 2),
-                    error=f"Chirp not detected (SNR={snr_db:.1f} dB)",
+                    error=f"Chirp not detected (SNR={snr_db:.1f} dB); please recalibrate",
+                )
+                continue
+
+            if requires_dual and len(arrivals) < 2:
+                self.mark_clock_jump(pid)
+                per_phone[pid] = PhoneSyncReport(
+                    synced=False,
+                    chirp_snr_db=round(snr_db, 2),
+                    error=f"Only {len(arrivals)} of 2 calibration chirps detected (SNR={snr_db:.1f} dB); please recalibrate",
                 )
                 continue
 

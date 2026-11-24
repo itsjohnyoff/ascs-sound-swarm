@@ -253,3 +253,219 @@ def test_dual_chirp_sync_mixed_rates_offsets_drift_and_60s_holdover() -> None:
     engine.mark_clock_jump("p2")
     assert engine.is_synced("p2") is False
     assert engine.is_synced("p1") is True
+
+
+def _build_dual_chirp_phone_slices(
+    phone_specs: list[tuple[str, float, float, int, float, float]],
+    room: RoomConfig,
+    t_emit_1: float = 1.0,
+    total_out_s: float = 7.5,
+    base_start_index: int = 10_000,
+    seed: int = 11,
+) -> tuple[dict[str, PhoneConfig], dict[str, PhoneAudioSlice]]:
+    c = speed_of_sound(room.temperature_c)
+    fs_sim = 48000
+    dual = generate_dual_chirp(fs_sim)
+    rng = np.random.default_rng(seed)
+    phones: dict[str, PhoneConfig] = {}
+    slices: dict[str, PhoneAudioSlice] = {}
+
+    for idx, (pid, x, y, fs_phone, offset_s, drift_ppm) in enumerate(phone_specs):
+        phones[pid] = PhoneConfig(phone_id=pid, label=pid, x_m=x, y_m=y, sample_rate=fs_phone)
+        tau_prop = math.hypot(x - room.speaker_x_m, y - room.speaker_y_m) / c
+        global_sig = np.zeros(int(math.ceil((t_emit_1 + total_out_s + 1.5) * fs_sim)), dtype=np.float32)
+        i_dir = int(round((t_emit_1 + tau_prop) * fs_sim))
+        global_sig[i_dir : i_dir + len(dual)] += dual
+
+        rec = _fractional_shift_and_resample(
+            global_sig, fs_phone, delay_s=offset_s, drift_ppm=drift_ppm, total_out_s=total_out_s
+        )
+        noise_std = float(np.std(dual[dual != 0])) / (10.0 ** (20.0 / 20.0))
+        rec += rng.normal(0.0, noise_std, size=len(rec)).astype(np.float32)
+        slices[pid] = PhoneAudioSlice(
+            phone_id=pid,
+            samples_f32=rec,
+            start_sample_index=base_start_index + idx * 5_000,
+            sample_rate=fs_phone,
+        )
+    return phones, slices
+
+
+def test_dual_chirp_rejects_phone_missing_first_chirp_and_invalidates_prior_sync() -> None:
+    room = RoomConfig(width_m=8.0, height_m=6.0, temperature_c=20.0, speaker_x_m=4.0, speaker_y_m=0.5)
+    specs = [
+        ("phone_a", 0.5, 0.5, 48000, 0.0, 0.0),
+        ("phone_b", 7.5, 0.5, 48000, 0.025, 0.0),
+    ]
+    phones, full_slices = _build_dual_chirp_phone_slices(specs, room, t_emit_1=1.0, total_out_s=7.5)
+
+    # Cut phone_b between chirp 1 (t~1.0s) and chirp 2 (t~6.0s) so it hears only chirp 2
+    cut_idx = int(round(3.0 * full_slices["phone_b"].sample_rate))
+    short_b = PhoneAudioSlice(
+        phone_id="phone_b",
+        samples_f32=full_slices["phone_b"].samples_f32[cut_idx:].copy(),
+        start_sample_index=full_slices["phone_b"].start_sample_index + cut_idx,
+        sample_rate=full_slices["phone_b"].sample_rate,
+    )
+    bad_slices = {"phone_a": full_slices["phone_a"], "phone_b": short_b}
+
+    # 1. Fresh dual-chirp calibration: phone_a synced, phone_b unsynced, overall success=False
+    engine = SyncEngine()
+    res = engine.calibrate_from_buffers(bad_slices, phones, room, mode="lfm_dual")
+    assert res.per_phone["phone_a"].synced is True
+    assert res.per_phone["phone_b"].synced is False
+    assert "recalibrate" in (res.per_phone["phone_b"].error or "").lower()
+    assert res.synced_count == 1
+    assert res.success is False
+    assert engine.is_synced("phone_a") is True
+    assert engine.is_synced("phone_b") is False
+    aligned = engine.extract_aligned_window(bad_slices, t_start_s=5.0, t_end_s=5.5, target_fs=48000)
+    assert set(aligned.keys()) == {"phone_a"}
+
+    # 2. Incomplete recalibration of a previously synced phone must invalidate its prior model
+    recal_engine = SyncEngine()
+    res_ok = recal_engine.calibrate_from_buffers(full_slices, phones, room, mode="lfm_dual")
+    assert res_ok.success is True
+    assert res_ok.synced_count == 2
+    assert recal_engine.is_synced("phone_b") is True
+    aligned_ok = recal_engine.extract_aligned_window(full_slices, t_start_s=0.5, t_end_s=1.0, target_fs=48000)
+    assert set(aligned_ok.keys()) == {"phone_a", "phone_b"}
+
+    # Advance sample indices for a second calibration round where phone_b again misses chirp 1
+    _, round2_full = _build_dual_chirp_phone_slices(
+        specs, room, t_emit_1=1.0, total_out_s=7.5, base_start_index=500_000, seed=19
+    )
+    cut2 = int(round(3.0 * round2_full["phone_b"].sample_rate))
+    round2_bad = {
+        "phone_a": round2_full["phone_a"],
+        "phone_b": PhoneAudioSlice(
+            phone_id="phone_b",
+            samples_f32=round2_full["phone_b"].samples_f32[cut2:].copy(),
+            start_sample_index=round2_full["phone_b"].start_sample_index + cut2,
+            sample_rate=round2_full["phone_b"].sample_rate,
+        ),
+    }
+    res_bad = recal_engine.calibrate_from_buffers(round2_bad, phones, room, mode="lfm_dual")
+    assert res_bad.per_phone["phone_a"].synced is True
+    assert res_bad.per_phone["phone_b"].synced is False
+    assert "recalibrate" in (res_bad.per_phone["phone_b"].error or "").lower()
+    assert res_bad.synced_count == 1
+    assert res_bad.success is False
+    assert recal_engine.is_synced("phone_a") is True
+    assert recal_engine.is_synced("phone_b") is False
+
+    # Previously synced phone_b must be excluded from aligned audio after incomplete recalibration
+    common_a_start = recal_engine.sample_to_global_time("phone_a", round2_bad["phone_a"].start_sample_index)
+    aligned_after = recal_engine.extract_aligned_window(
+        round2_bad, t_start_s=common_a_start + 3.5, t_end_s=common_a_start + 4.0, target_fs=48000
+    )
+    assert set(aligned_after.keys()) == {"phone_a"}
+
+
+def test_ggwave_hybrid_requires_both_chirps_and_other_phones_continue() -> None:
+    room = RoomConfig(width_m=8.0, height_m=6.0, temperature_c=20.0, speaker_x_m=4.0, speaker_y_m=0.5)
+    specs = [
+        ("phone_a", 0.5, 0.5, 48000, 0.0, 0.0),
+        ("phone_b", 7.5, 0.5, 48000, 0.030, 0.0),
+        ("phone_c", 4.0, 5.5, 44100, -0.050, +25.0),
+    ]
+    phones, slices = _build_dual_chirp_phone_slices(specs, room, t_emit_1=1.0, total_out_s=7.5, seed=23)
+    cut_idx = int(round(3.0 * slices["phone_b"].sample_rate))
+    slices["phone_b"] = PhoneAudioSlice(
+        phone_id="phone_b",
+        samples_f32=slices["phone_b"].samples_f32[cut_idx:].copy(),
+        start_sample_index=slices["phone_b"].start_sample_index + cut_idx,
+        sample_rate=slices["phone_b"].sample_rate,
+    )
+
+    engine = SyncEngine()
+    res = engine.calibrate_from_buffers(slices, phones, room, mode="ggwave_hybrid")
+    assert res.success is True
+    assert res.synced_count == 2
+    assert res.per_phone["phone_a"].synced is True
+    assert res.per_phone["phone_c"].synced is True
+    assert res.per_phone["phone_b"].synced is False
+    assert "recalibrate" in (res.per_phone["phone_b"].error or "").lower()
+    assert engine.is_synced("phone_b") is False
+
+    common = engine.get_common_time_range(slices)
+    assert common is not None
+    aligned = engine.extract_aligned_window(slices, t_start_s=common[0] + 0.1, t_end_s=common[0] + 0.4, target_fs=48000)
+    assert set(aligned.keys()) == {"phone_a", "phone_c"}
+
+
+def test_lfm_single_mode_preserved() -> None:
+    room = RoomConfig(width_m=8.0, height_m=6.0, temperature_c=20.0, speaker_x_m=4.0, speaker_y_m=0.5)
+    c = speed_of_sound(room.temperature_c)
+    fs = 48000
+    chirp = generate_lfm_chirp(fs)
+    specs = [("phone_a", 0.5, 0.5, 0.020), ("phone_b", 7.5, 0.5, -0.040)]
+    phones: dict[str, PhoneConfig] = {}
+    slices: dict[str, PhoneAudioSlice] = {}
+
+    for idx, (pid, x, y, offset_s) in enumerate(specs):
+        phones[pid] = PhoneConfig(phone_id=pid, label=pid, x_m=x, y_m=y, sample_rate=fs)
+        tau_prop = math.hypot(x - room.speaker_x_m, y - room.speaker_y_m) / c
+        global_sig = np.zeros(int(2.0 * fs), dtype=np.float32)
+        i_dir = int(round((0.5 + tau_prop) * fs))
+        global_sig[i_dir : i_dir + len(chirp)] = chirp
+        rec = _fractional_shift_and_resample(global_sig, fs, delay_s=offset_s, drift_ppm=0.0, total_out_s=1.5)
+        slices[pid] = PhoneAudioSlice(
+            phone_id=pid, samples_f32=rec, start_sample_index=10_000 + idx * 1000, sample_rate=fs
+        )
+
+    engine = SyncEngine()
+    res = engine.calibrate_from_buffers(slices, phones, room, mode="lfm_single")
+    assert res.success is True
+    assert res.synced_count == 2
+    assert res.per_phone["phone_a"].synced is True
+    assert res.per_phone["phone_b"].synced is True
+    assert res.max_residual_ms is not None and res.max_residual_ms < 0.25
+
+
+def test_dual_chirp_rejects_full_length_noisy_phone_missing_chirp_1() -> None:
+    room = RoomConfig(width_m=8.0, height_m=6.0, temperature_c=20.0, speaker_x_m=4.0, speaker_y_m=0.5)
+    c = speed_of_sound(room.temperature_c)
+    fs = 48000
+    n_samples = int(7.0 * fs)
+    chirp = generate_lfm_chirp(fs)
+    rng = np.random.default_rng(1234)
+
+    phones = {
+        "phone_a": PhoneConfig(phone_id="phone_a", label="phone_a", x_m=0.5, y_m=0.5, sample_rate=fs),
+        "phone_b": PhoneConfig(phone_id="phone_b", label="phone_b", x_m=7.5, y_m=0.5, sample_rate=fs),
+    }
+
+    t_emit_1 = 0.8
+    t_emit_2 = t_emit_1 + DUAL_CHIRP_GAP_S
+    noise_std = float(np.std(chirp)) / (10.0 ** (20.0 / 20.0))
+
+    slices: dict[str, PhoneAudioSlice] = {}
+    for idx, (pid, include_chirp_1) in enumerate((("phone_a", True), ("phone_b", False))):
+        pcfg = phones[pid]
+        tau_prop = math.hypot(pcfg.x_m - room.speaker_x_m, pcfg.y_m - room.speaker_y_m) / c
+        sig = rng.normal(0.0, noise_std, size=n_samples).astype(np.float32)
+        if include_chirp_1:
+            i1 = int(round((t_emit_1 + tau_prop) * fs))
+            sig[i1 : i1 + len(chirp)] += chirp
+        i2 = int(round((t_emit_2 + tau_prop) * fs))
+        sig[i2 : i2 + len(chirp)] += chirp
+        slices[pid] = PhoneAudioSlice(
+            phone_id=pid,
+            samples_f32=sig,
+            start_sample_index=10_000 + idx * 5_000,
+            sample_rate=fs,
+        )
+
+    arrivals_b, _ = detect_chirp_arrivals(slices["phone_b"].samples_f32, fs=fs, mode="lfm_dual")
+    assert len(arrivals_b) == 1
+
+    engine = SyncEngine()
+    res = engine.calibrate_from_buffers(slices, phones, room, mode="lfm_dual")
+    assert res.per_phone["phone_a"].synced is True
+    assert res.per_phone["phone_b"].synced is False
+    assert "recalibrate" in (res.per_phone["phone_b"].error or "").lower()
+    assert res.synced_count == 1
+    assert res.success is False
+    assert engine.is_synced("phone_a") is True
+    assert engine.is_synced("phone_b") is False
