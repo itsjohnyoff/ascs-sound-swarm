@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from io import BytesIO
@@ -19,9 +21,13 @@ from pydantic import BaseModel, Field, FiniteFloat, ValidationError
 
 from backend.server.audio_buffer import BUFFER_DURATION_S, decode_audio_frame
 from backend.server.processor import Processor
+from backend.server.recording import Recording
 from backend.server.session import CalibrationConflict, Session
 from shared.protocol import CalibrationMode, RoomConfig, SoundClass
 
+logger = logging.getLogger(__name__)
+
+RECORDINGS_DIR = Path("data/recordings")
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 SocketQueue = asyncio.Queue[dict]
 
@@ -46,6 +52,10 @@ class CalibrateArm(BaseModel):
 class CalibrateSolve(CalibrateArm):
     calibration_id: str
     window_s: float = Field(default=7.0, gt=0, le=BUFFER_DURATION_S)
+
+
+class RecordStart(BaseModel):
+    name: str = Field(default="spike-01", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(?:\.npz)?$")
 
 
 class NewTrial(BaseModel):
@@ -92,6 +102,7 @@ def create_app(
     session_factory: Callable[[], Session] = Session,
     *,
     frontend_dir: Path = FRONTEND_DIST,
+    recordings_dir: Path = RECORDINGS_DIR,
 ) -> FastAPI:
     dashboards: set[SocketQueue] = set()
     phones: dict[str, SocketQueue] = {}
@@ -118,6 +129,8 @@ def create_app(
             finally:
                 for task in tasks:
                     task.cancel()
+                if session.recording is not None:
+                    discard_recording(session)
 
     app = FastAPI(title="ASCS Sound Swarm", lifespan=lifespan)
     app.add_middleware(
@@ -200,6 +213,59 @@ def create_app(
             for phone_id in phones:
                 push_status(session, phone_id)
         return payload
+
+    def discard_recording(session: Session) -> None:
+        recording, session.recording = session.recording, None
+        if recording is not None:
+            try:
+                recording.close()
+            except OSError:
+                logger.exception("Could not clean up recording %s", recording.path)
+
+    @app.post("/api/record/start")
+    async def start_recording(request: Request, body: RecordStart = RecordStart()):
+        session: Session = request.app.state.session
+        if session.recording is not None:
+            raise HTTPException(409, "A recording is already active or awaiting save")
+        path = recordings_dir / f"{body.name.removesuffix('.npz')}.npz"
+        try:
+            if path.exists():
+                raise HTTPException(409, "A recording with this name already exists")
+            session.recording = Recording(path, session.room)
+        except OSError as exc:
+            logger.exception("Could not start recording %s", path)
+            raise HTTPException(507, "Could not create recording storage") from exc
+        return {"status": "recording", "path": str(path)}
+
+    @app.post("/api/record/stop")
+    async def stop_recording(request: Request):
+        session: Session = request.app.state.session
+        recording = session.recording
+        if recording is None or recording.saving:
+            raise HTTPException(409, "No recording is ready to stop")
+        if recording.failed:
+            discard_recording(session)
+            raise HTTPException(507, "Capture storage failed")
+        if not recording.has_audio:
+            discard_recording(session)
+            raise HTTPException(409, "Recording received no phone audio")
+
+        recording.stopped_at_s = recording.stopped_at_s or time.time()
+        recording.saving = True
+        try:
+            # Keep ownership of the spool until the writer returns, including if
+            # the caller disconnects during the save.
+            await anyio.to_thread.run_sync(recording.save)
+        except FileExistsError as exc:
+            raise HTTPException(409, "A recording with this name already exists") from exc
+        except OSError as exc:
+            logger.exception("Could not save recording %s", recording.path)
+            raise HTTPException(507, "Could not save the recording. Retry stop to save captured audio.") from exc
+        else:
+            discard_recording(session)
+            return {"status": "saved", "path": str(recording.path)}
+        finally:
+            recording.saving = False
 
     @app.get("/api/eval/trials")
     async def get_trials(request: Request):

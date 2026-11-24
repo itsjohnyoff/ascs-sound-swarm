@@ -15,6 +15,7 @@ import numpy as np
 
 from backend.server.audio_buffer import BUFFER_DURATION_S, PhoneRingBuffer
 from backend.server.judge_eval import JudgeEval
+from backend.server.recording import Recording
 from shared.protocol import (
     FLAG_CLOCK_JUMP,
     CalibrationMode,
@@ -115,6 +116,7 @@ class Session:
         self.buffers: dict[str, PhoneRingBuffer] = {}
         self.detections: dict[str, LocalizationResult] = {}
         self.judge = JudgeEval()
+        self.recording: Recording | None = None
         self.sync_engine = sync_engine if sync_engine is not None else _discover(
             "backend.dsp.pipeline", "SyncEngine", StubSyncEngine,
         )
@@ -163,6 +165,8 @@ class Session:
     def disconnect(self, phone_id: str) -> None:
         self.set_phone(phone_id, connected=False, rms=0.0)
         self.buffers.pop(phone_id, None)
+        if self.recording is not None:
+            self.recording.disconnect(phone_id)
         if self.calibration is not None:
             self.calibration.start_indices.pop(phone_id, None)
         self._invalidate_clock(phone_id, "unsynced")
@@ -197,7 +201,11 @@ class Session:
             rate_changed = had_audio
         if not buffer.append(frame):
             return False
-        self.set_phone(phone_id, sample_rate=frame.sample_rate, rms=buffer.rms, dropped_frames=buffer.dropped_frames)
+        phone = self.set_phone(
+            phone_id, sample_rate=frame.sample_rate, rms=buffer.rms, dropped_frames=buffer.dropped_frames,
+        )
+        if self.recording is not None:
+            self.recording.append(phone, frame)
         return rate_changed or bool(frame.flags & FLAG_CLOCK_JUMP)
 
     def active_phones(self) -> dict[str, PhoneConfig]:
