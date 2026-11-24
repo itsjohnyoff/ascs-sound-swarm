@@ -188,6 +188,8 @@ def find_events_offline(slices: dict[str, PhoneAudioSlice], phones: dict[str, Ph
                     onsets.append((t, pid))
     grouper = EventGrouper(max_spread_s(room), min_phones)
     ends = {pid: engine.to_global(pid, s.start_sample_index + len(s.samples_f32) - 1) for pid, s in slices.items()}
+    if all(t is None for t in ends.values()):
+        return []  # nothing synced
     data_end = min(t for t in ends.values() if t is not None)
     out: list[OfflineDetection] = []
 

@@ -35,6 +35,9 @@ class SimPhone:
     start_index: int = 0
     drop_ranges_s: list[tuple[float, float]] = field(default_factory=list)  # local seconds
     clip_level: float | None = None
+    # Occlusion: direct path scaled by direct_gain, plus a reflection (delay_s, gain) of the same source
+    direct_gain: float = 1.0
+    occluder_echo: tuple[float, float] | None = None
 
 
 @dataclass
@@ -98,6 +101,10 @@ def simulate(
             # onto this phone's (drifting) clock.
             paths = [(float(np.hypot(sx - ph.x_m, sy - ph.y_m)), g, extra)
                      for (sx, sy), g, extra in _paths(ev.x_m, ev.y_m, room, reflection_gain, echo)]
+            d_direct = paths[0][0]
+            paths[0] = (d_direct, paths[0][1] * ph.direct_gain, 0.0)
+            if ph.occluder_echo is not None:
+                paths.append((d_direct, ph.occluder_echo[1], ph.occluder_echo[0]))
             delays = [d / c + extra for d, _, extra in paths]
             t_ref = ev.t_s + min(delays)
             span = int(np.ceil((max(delays) - min(delays)) * SRC_FS))
@@ -213,8 +220,13 @@ JUDGE_POINTS = [  # (x, y, kind); last two are outside the phone hull
 
 def judge_scenario(*, n_phones: int = 4, snr_db: float = 30.0, reflection_gain: float = 0.3, seed: int = 0,
                    room: RoomConfig = DEFAULT_ROOM, event_gap_s: float = 2.5,
-                   chirp_times_s: tuple[float, ...] = (1.0, 11.0)) -> dict[str, np.ndarray]:
-    """Chirps, then 10 positions (5 claps, 5 drones), 2 of them outside the hull."""
+                   chirp_times_s: tuple[float, ...] = (1.0, 11.0),
+                   occluded: tuple[str, float, float, float] | None = None) -> dict[str, np.ndarray]:
+    """Chirps, then 10 positions (5 claps, 5 drones), 2 of them outside the hull.
+
+    occluded=(phone_id, direct_gain, echo_delay_s, echo_gain) blocks one phone's direct path
+    for the target sounds (not the chirps), which corrupts every pair that phone is in.
+    """
     rng = np.random.default_rng(seed)
     phones = default_phones(rng, n_phones, snr_db=snr_db)
     events = [SimEvent(t, room.speaker_x_m, room.speaker_y_m, "chirp") for t in chirp_times_s]
@@ -222,5 +234,19 @@ def judge_scenario(*, n_phones: int = 4, snr_db: float = 30.0, reflection_gain: 
     for x, y, kind in JUDGE_POINTS:
         events.append(SimEvent(t, x, y, kind, duration_s=0.9 if kind == "drone" else None))
         t += event_gap_s
-    return simulate(room, phones, events, t + 1.0, reflection_gain=reflection_gain, seed=seed,
-                    notes="judge_scenario")
+    rec = simulate(room, phones, events, t + 1.0, reflection_gain=reflection_gain, seed=seed, notes="judge_scenario")
+    if occluded is None:
+        return rec
+    # Re-render the occluded phone: chirps clean, target sounds through the occluder.
+    pid, g_direct, delay, g_echo = occluded
+    ph = next(p for p in phones if p.phone_id == pid)
+    chirps = [e for e in events if e.kind == "chirp"]
+    targets = [e for e in events if e.kind != "chirp"]
+    clean = simulate(room, [ph], chirps, t + 1.0, reflection_gain=reflection_gain, seed=seed)
+    ph.direct_gain, ph.occluder_echo, ph.snr_db = g_direct, (delay, g_echo), 200.0
+    blocked = simulate(room, [ph], targets, t + 1.0, reflection_gain=reflection_gain, seed=seed)
+    rec[f"{pid}_pcm"] = (clean[f"{pid}_pcm"] + blocked[f"{pid}_pcm"]).astype(np.float32)
+    meta = json.loads(str(rec["meta"]))
+    meta["truth"]["occluded"] = list(occluded)
+    rec["meta"] = np.asarray(json.dumps(meta))
+    return rec
