@@ -275,6 +275,7 @@ class Session:
             crop = min(len(audio.samples_f32), max(0, run.start_indices.get(pid, 0) - audio.start_sample_index))
             slices[pid] = PhoneAudioSlice(
                 pid, audio.samples_f32[crop:], audio.start_sample_index + crop, audio.sample_rate,
+                audio.valid_mask[crop:] if audio.valid_mask is not None else None,
             )
         # Calibrate a private clock snapshot so a jump or disconnect can invalidate
         # the run without blocking ingestion or letting the worker restore old clocks.
