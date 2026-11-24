@@ -121,3 +121,84 @@ class AdaptiveEventTrigger:
             onset_offset_s=0.0,
             peak_snr_db=best_snr_db,
         )
+
+
+class OnsetDetector:
+    """v2 stateful per-phone onset detector for event-driven server ingestion."""
+
+    def __init__(
+        self,
+        hop_s: float = 0.005,
+        snr_db_threshold: float = 10.0,
+        refractory_s: float = 0.15,
+        min_rms: float = 0.004,
+    ) -> None:
+        self.hop_s = hop_s
+        self.snr_db_threshold = snr_db_threshold
+        self.refractory_s = refractory_s
+        self.min_rms = min_rms
+        self._floor: float | None = None
+        self._last_onset_idx: int | None = None
+        self._tail: np.ndarray = np.empty(0, dtype=np.float32)
+        self._tail_valid: np.ndarray = np.empty(0, dtype=bool)
+        self._next_sample_idx: int | None = None
+
+    def push(
+        self,
+        samples: np.ndarray,
+        start_sample_index: int,
+        fs: int,
+        valid_mask: np.ndarray | None = None,
+    ) -> list[int]:
+        """Push an incoming audio chunk and return absolute sample indices of detected onsets."""
+        if len(samples) == 0:
+            return []
+        x = np.asarray(samples, dtype=np.float32)
+        v = (
+            np.asarray(valid_mask, dtype=bool)
+            if valid_mask is not None
+            else np.ones(len(x), dtype=bool)
+        )
+        if len(v) != len(x):
+            raise ValueError(f"valid_mask length ({len(v)}) != samples length ({len(x)})")
+
+        if self._next_sample_idx is None or start_sample_index != self._next_sample_idx:
+            # Discontinuity or first push: reset leftover tail cleanly
+            buf = x
+            buf_v = v
+            base_idx = int(start_sample_index)
+        else:
+            buf = np.concatenate([self._tail, x]) if len(self._tail) else x
+            buf_v = np.concatenate([self._tail_valid, v]) if len(self._tail_valid) else v
+            base_idx = int(start_sample_index) - len(self._tail)
+
+        hop = max(1, int(round(self.hop_s * fs)))
+        refractory_n = int(round(self.refractory_s * fs))
+        n_hops = len(buf) // hop
+        onsets: list[int] = []
+
+        for h in range(n_hops):
+            s = h * hop
+            e = s + hop
+            if not bool(np.all(buf_v[s:e])):
+                continue
+            seg = buf[s:e].astype(np.float64)
+            rms = float(np.sqrt(np.mean(seg * seg)))
+            if self._floor is None:
+                self._floor = min(max(rms, 1e-5), 0.015)
+
+            snr_db = 20.0 * float(np.log10(max(rms, 1e-12) / max(self._floor, 1e-6)))
+            hop_abs_idx = base_idx + s
+
+            if snr_db > self.snr_db_threshold and rms >= self.min_rms:
+                if self._last_onset_idx is None or (hop_abs_idx - self._last_onset_idx) >= refractory_n:
+                    self._last_onset_idx = hop_abs_idx
+                    onsets.append(hop_abs_idx)
+            else:
+                self._floor = 0.95 * self._floor + 0.05 * max(rms, 1e-5)
+
+        rem_start = n_hops * hop
+        self._tail = buf[rem_start:].copy()
+        self._tail_valid = buf_v[rem_start:].copy()
+        self._next_sample_idx = int(start_sample_index) + len(x)
+        return onsets
