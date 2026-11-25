@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCS Chirp</title>
+<style>
+  body { font: 18px system-ui, sans-serif; background: #0b0f14; color: #e8eef5; padding: 24px; }
+  button { font-size: 26px; padding: 18px 40px; margin: 8px 8px 8px 0; border-radius: 12px; border: 0; background: #2f81f7; color: #fff; }
+  #out { margin-top: 16px; font-family: ui-monospace, monospace; color: #8b949e; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Chirp player (spike)</h1>
+  <button id="one">Play chirp</button>
+  <button id="dual">Play dual chirp (5 s apart)</button>
+  <div id="out"></div>
+  <script type="module" src="/src/chirp/main.ts"></script>
+</body>
+</html>
