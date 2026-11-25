@@ -81,6 +81,8 @@ def _compute_chirp_envelope(
     fs: int,
     template: np.ndarray | None = None,
     valid_mask: np.ndarray | None = None,
+    f_low: float = 1200.0,
+    f_high: float = 8500.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, int] | None:
     """Bandpass filter audio and compute matched-filter Hilbert envelope."""
     if valid_mask is not None and len(valid_mask) != len(samples_f32):
@@ -94,8 +96,8 @@ def _compute_chirp_envelope(
         return None
     tpl /= tpl_norm
 
-    hi = min(8500.0, 0.48 * fs)
-    sos = butter(4, [1200.0, hi], btype="bandpass", fs=fs, output="sos")
+    hi = min(f_high, 0.48 * fs)
+    sos = butter(4, [f_low, hi], btype="bandpass", fs=fs, output="sos")
     x_filt = sosfiltfilt(sos, samples_f32.astype(np.float64))
 
     corr = fftconvolve(x_filt, tpl[::-1], mode="valid")
@@ -126,6 +128,8 @@ def _pick_first_arrival_with_ncc(
     sigma: float,
     min_snr_db: float,
     min_ncc: float,
+    lookback_s: float = 0.025,
+    direct_path_ratio: float = 0.55,
 ) -> tuple[float | None, float, float]:
     """Locate earliest direct-path peak in env[start:end] matching the chirp template."""
     start = max(0, start)
@@ -141,11 +145,11 @@ def _pick_first_arrival_with_ncc(
     if snr_db < min_snr_db:
         return None, snr_db, 0.0
 
-    # Search backwards 25 ms before strongest peak to recover direct path even if a wall echo is louder
-    lookback = int(round(0.025 * fs))
+    # Search backwards before strongest peak to recover direct path even if a wall echo is louder
+    lookback = int(round(lookback_s * fs))
     win_start = max(start, i_max - lookback)
     sub = env[win_start : i_max + 1]
-    peaks, _ = find_peaks(sub, height=0.55 * peak_val, distance=max(1, int(0.001 * fs)))
+    peaks, _ = find_peaks(sub, height=direct_path_ratio * peak_val, distance=max(1, int(0.001 * fs)))
     for pk in peaks:
         cand = win_start + int(pk)
         ncc = _local_template_ncc(env, x_filt, cand, tpl_len)
@@ -168,6 +172,8 @@ def _pick_first_arrival(
     sigma: float,
     min_snr_db: float,
     min_ncc: float,
+    lookback_s: float = 0.025,
+    direct_path_ratio: float = 0.55,
 ) -> tuple[float | None, float]:
     idx, snr_db, _ = _pick_first_arrival_with_ncc(
         env=env,
@@ -179,6 +185,8 @@ def _pick_first_arrival(
         sigma=sigma,
         min_snr_db=min_snr_db,
         min_ncc=min_ncc,
+        lookback_s=lookback_s,
+        direct_path_ratio=direct_path_ratio,
     )
     return idx, snr_db
 
@@ -207,6 +215,10 @@ def detect_all_chirps(
     min_spacing_s: float = 1.0,
     min_snr_db: float = 12.0,
     min_ncc: float = 0.25,
+    lookback_s: float = 0.025,
+    direct_path_ratio: float = 0.55,
+    f_low: float = 1200.0,
+    f_high: float = 8500.0,
 ) -> list[ChirpArrival]:
     """Detect all LFM chirps in a recording or buffer slice, returning chronological Arrivals."""
     prep = _compute_chirp_envelope(
@@ -214,6 +226,8 @@ def detect_all_chirps(
         fs=fs,
         template=template,
         valid_mask=valid_mask,
+        f_low=f_low,
+        f_high=f_high,
     )
     if prep is None:
         return []
@@ -234,6 +248,8 @@ def detect_all_chirps(
             sigma=sigma,
             min_snr_db=min_snr_db,
             min_ncc=min_ncc,
+            lookback_s=lookback_s,
+            direct_path_ratio=direct_path_ratio,
         )
         if idx_rel is None:
             break
@@ -264,14 +280,23 @@ def detect_chirp_arrivals(
     min_snr_db: float = 12.0,
     min_ncc: float = 0.25,
     valid_mask: np.ndarray | None = None,
+    lookback_s: float = 0.025,
+    direct_path_ratio: float = 0.55,
+    f_low: float = 1200.0,
+    f_high: float = 8500.0,
 ) -> tuple[list[float], float]:
     """Detect fractional chirp start sample indices inside samples_f32."""
-    prep = _compute_chirp_envelope(samples_f32, fs=fs, valid_mask=valid_mask)
+    prep = _compute_chirp_envelope(
+        samples_f32, fs=fs, valid_mask=valid_mask, f_low=f_low, f_high=f_high,
+    )
     if prep is None:
         return [], -100.0
     env, x_filt, _, sigma, tpl_len = prep
 
-    p_a, snr_a = _pick_first_arrival(env, x_filt, tpl_len, fs, 0, len(env), sigma, min_snr_db, min_ncc)
+    p_a, snr_a = _pick_first_arrival(
+        env, x_filt, tpl_len, fs, 0, len(env), sigma, min_snr_db, min_ncc,
+        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio,
+    )
     if p_a is None:
         return [], snr_a
 
@@ -284,11 +309,17 @@ def detect_chirp_arrivals(
 
     fwd_s = int(round(p_a)) + gap_n - tol
     fwd_e = int(round(p_a)) + gap_n + tol
-    p_fwd, snr_fwd = _pick_first_arrival(env, x_filt, tpl_len, fs, fwd_s, fwd_e, sigma, partner_min_snr, min_ncc)
+    p_fwd, snr_fwd = _pick_first_arrival(
+        env, x_filt, tpl_len, fs, fwd_s, fwd_e, sigma, partner_min_snr, min_ncc,
+        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio,
+    )
 
     bwd_s = int(round(p_a)) - gap_n - tol
     bwd_e = int(round(p_a)) - gap_n + tol
-    p_bwd, snr_bwd = _pick_first_arrival(env, x_filt, tpl_len, fs, bwd_s, bwd_e, sigma, partner_min_snr, min_ncc)
+    p_bwd, snr_bwd = _pick_first_arrival(
+        env, x_filt, tpl_len, fs, bwd_s, bwd_e, sigma, partner_min_snr, min_ncc,
+        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio,
+    )
 
     candidates: list[tuple[float, float]] = []
     if p_fwd is not None:
@@ -320,7 +351,18 @@ class _ClockModel:
 class SyncEngine:
     """Acoustic STO + SRO (clock drift) calibration and sub-sample timeline aligner."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        chirp_lookback_s: float = 0.025,
+        chirp_direct_path_ratio: float = 0.55,
+        chirp_f_low: float = 1200.0,
+        chirp_f_high: float = 8500.0,
+    ) -> None:
+        self.chirp_lookback_s = chirp_lookback_s
+        self.chirp_direct_path_ratio = chirp_direct_path_ratio
+        self.chirp_f_low = chirp_f_low
+        self.chirp_f_high = chirp_f_high
         self._models: dict[str, _ClockModel] = {}
         self._v2_fitter = ReferenceClockFitter()
 
@@ -401,12 +443,23 @@ class SyncEngine:
             valid_mask = getattr(slc, "valid_mask", None)
             if requires_dual:
                 rel_arrivals, snr_db = detect_chirp_arrivals(
-                    slc.samples_f32, fs=slc.sample_rate, mode=mode, valid_mask=valid_mask,
+                    slc.samples_f32,
+                    fs=slc.sample_rate,
+                    mode=mode,
+                    valid_mask=valid_mask,
+                    lookback_s=self.chirp_lookback_s,
+                    direct_path_ratio=self.chirp_direct_path_ratio,
+                    f_low=self.chirp_f_low,
+                    f_high=self.chirp_f_high,
                 )
                 arrivals = []
                 if rel_arrivals:
                     prep = _compute_chirp_envelope(
-                        slc.samples_f32, fs=slc.sample_rate, valid_mask=valid_mask,
+                        slc.samples_f32,
+                        fs=slc.sample_rate,
+                        valid_mask=valid_mask,
+                        f_low=self.chirp_f_low,
+                        f_high=self.chirp_f_high,
                     )
                     if prep is not None:
                         env, x_filt, _, _, tpl_len = prep
@@ -431,6 +484,10 @@ class SyncEngine:
                     fs=slc.sample_rate,
                     start_sample_index=slc.start_sample_index,
                     valid_mask=valid_mask,
+                    lookback_s=self.chirp_lookback_s,
+                    direct_path_ratio=self.chirp_direct_path_ratio,
+                    f_low=self.chirp_f_low,
+                    f_high=self.chirp_f_high,
                 )
                 snr_db = max((a.snr_db for a in arrivals), default=-100.0)
 
@@ -681,7 +738,14 @@ class SyncEngine:
                 continue
 
             arrivals, snr_db = detect_chirp_arrivals(
-                slc.samples_f32, fs=slc.sample_rate, mode=mode, valid_mask=slc.valid_mask,
+                slc.samples_f32,
+                fs=slc.sample_rate,
+                mode=mode,
+                valid_mask=slc.valid_mask,
+                lookback_s=self.chirp_lookback_s,
+                direct_path_ratio=self.chirp_direct_path_ratio,
+                f_low=self.chirp_f_low,
+                f_high=self.chirp_f_high,
             )
             if not arrivals:
                 self.mark_clock_jump(pid)

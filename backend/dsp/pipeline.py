@@ -32,9 +32,38 @@ def _filter_clipped_phones(
 class LocalizationPipeline:
     """End-to-end event trigger + 2D SRP-PHAT + Huber multilateration pipeline."""
 
-    def __init__(self, grid_spacing_m: float = 0.15) -> None:
-        self._trigger = AdaptiveEventTrigger()
-        self._localizer = AcousticLocalizer2D(grid_spacing_m=grid_spacing_m)
+    def __init__(
+        self,
+        grid_spacing_m: float = 0.15,
+        *,
+        f_min: float = 300.0,
+        f_max: float = 6000.0,
+        phat_beta: float = 0.8,
+        cycle_threshold_s: float = 0.0015,
+        loo_residual_threshold_s: float = 0.0005,
+        sustained_frame_s: float = 0.250,
+        sustained_max_frames: int = 3,
+        transient_pre_s: float = 0.015,
+        transient_post_s: float = 0.065,
+    ) -> None:
+        self.sustained_frame_s = sustained_frame_s
+        self.sustained_max_frames = sustained_max_frames
+        self.transient_pre_s = transient_pre_s
+        self.transient_post_s = transient_post_s
+        self._trigger = AdaptiveEventTrigger(
+            sustained_frame_s=sustained_frame_s,
+            sustained_max_frames=sustained_max_frames,
+            transient_pre_s=transient_pre_s,
+            transient_post_s=transient_post_s,
+        )
+        self._localizer = AcousticLocalizer2D(
+            grid_spacing_m=grid_spacing_m,
+            f_min=f_min,
+            f_max=f_max,
+            phat_beta=phat_beta,
+            cycle_threshold_s=cycle_threshold_s,
+            loo_residual_threshold_s=loo_residual_threshold_s,
+        )
         self._event_counter = 0
 
     def localize(
@@ -65,12 +94,12 @@ class LocalizationPipeline:
         if kind == "transient":
             frames = [{pid: arr[:n_samples] for pid, arr in eligible.items()}]
         else:
-            frame_len = min(n_samples, int(round(0.250 * fs)))
+            frame_len = min(n_samples, int(round(self.sustained_frame_s * fs)))
             step = max(1, frame_len // 2)
             hann = np.hanning(frame_len).astype(np.float32)
             frames = []
             pos = 0
-            while pos + frame_len <= n_samples and len(frames) < 3:
+            while pos + frame_len <= n_samples and len(frames) < self.sustained_max_frames:
                 frames.append({pid: arr[pos : pos + frame_len] * hann for pid, arr in eligible.items()})
                 pos += step
             if not frames:

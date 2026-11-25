@@ -53,8 +53,22 @@ def _srp_pair_contribution(
 class AcousticLocalizer2D:
     """Two-stage 2D acoustic localizer: vectorized SRP-PHAT -> robust Huber least-squares."""
 
-    def __init__(self, grid_spacing_m: float = 0.15) -> None:
+    def __init__(
+        self,
+        grid_spacing_m: float = 0.15,
+        *,
+        f_min: float = 300.0,
+        f_max: float = 6000.0,
+        phat_beta: float = 0.8,
+        cycle_threshold_s: float = 0.0015,
+        loo_residual_threshold_s: float = 0.0005,
+    ) -> None:
         self.grid_spacing_m = grid_spacing_m
+        self.f_min = f_min
+        self.f_max = f_max
+        self.phat_beta = phat_beta
+        self.cycle_threshold_s = cycle_threshold_s
+        self.loo_residual_threshold_s = loo_residual_threshold_s
         self._cache: _GridCache | None = None
 
     def _get_grid(
@@ -141,7 +155,14 @@ class AcousticLocalizer2D:
 
             for frame in event.frames:
                 lags, corr, _, w = compute_gcc_phat(
-                    frame[pi], frame[pj], fs=fs, max_tau_s=max_tau, interp_factor=interp_f
+                    frame[pi],
+                    frame[pj],
+                    fs=fs,
+                    max_tau_s=max_tau,
+                    f_min=self.f_min,
+                    f_max=self.f_max,
+                    phat_beta=self.phat_beta,
+                    interp_factor=interp_f,
                 )
                 if len(lags) < 2:
                     continue
@@ -236,7 +257,7 @@ class AcousticLocalizer2D:
                     if k == i or k == j:
                         continue
                     loop_errs.append(abs(pair_lookup[(i, j)] + pair_lookup[(j, k)] - pair_lookup[(i, k)]))
-                if loop_errs and float(np.median(loop_errs)) > 0.0015:
+                if loop_errs and float(np.median(loop_errs)) > self.cycle_threshold_s:
                     inliers[p_idx] = False
                     eff_weights[p_idx] *= 0.1
 
@@ -303,7 +324,7 @@ class AcousticLocalizer2D:
                     if best_drop is None or s_res < best_drop[0]:
                         best_drop = (s_res, float(sub_lsq.x[0]), float(sub_lsq.x[1]), bad_p, sub_lsq, sub_srp)
 
-                if best_drop is not None and best_drop[0] < 0.0005 and best_drop[0] < 0.35 * full_global_res:
+                if best_drop is not None and best_drop[0] < self.loo_residual_threshold_s and best_drop[0] < 0.35 * full_global_res:
                     residual_s, x_est, y_est, bad_p, lsq, srp_map = best_drop
                     inliers = [not (i == bad_p or j == bad_p) for i, j in grid.pairs]
                     for p_idx, is_in in enumerate(inliers):
