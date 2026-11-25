@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from backend.dsp.pipeline import LocalizationPipeline, OnsetDetector, SyncEngine
 from backend.dsp.replay import RecordedSession, load_recording_npz
@@ -38,6 +39,7 @@ from shared.protocol import (
     SUSTAINED_WINDOW_S,
     EventKind,
 )
+from sim.room import true_time
 
 MAX_COMBOS = 200
 MATCH_WINDOW_S = 0.5
@@ -130,7 +132,7 @@ def load_ground_truth(meta: dict[str, Any], truth_csv: str | Path | None = None)
     """Load ground-truth events from a CSV file or recording metadata."""
     if truth_csv is not None:
         p = Path(truth_csv)
-        with p.open("r", newline="", encoding="utf-8") as fh:
+        with p.open("r", newline="", encoding="utf-8-sig") as fh:
             reader = csv.DictReader(fh)
             fields = set(reader.fieldnames or ())
             if {"gt_x_m", "gt_y_m"} <= fields:
@@ -144,6 +146,8 @@ def load_ground_truth(meta: dict[str, Any], truth_csv: str | Path | None = None)
             for row in reader:
                 if not row.get(xk) or not row.get(yk):
                     continue
+                if "trial_idx" in fields and not (row.get("t_s") or "").strip():
+                    raise ValueError(f"Judge CSV '{p}' needs a recording-relative t_s for every trial (including misses)")
                 t_raw = row.get("t_s") if "t_s" in fields else row.get("timestamp_s")
                 kind_raw = row.get("kind") if "kind" in fields else row.get("expected_class")
                 events.append(
@@ -258,56 +262,53 @@ def _extract_windows(
     return out
 
 
-def _sim_true_time(truth_phone: dict[str, Any], sample_index: float) -> float:
-    k = sample_index - truth_phone["start_index"]
-    return float(truth_phone["start_s"] + k / (truth_phone["fs"] * (1.0 + truth_phone["drift_ppm"] * 1e-6)))
-
-
 def _match_errors(
     detections: list[tuple[float, float, float]],  # (t0, x_m, y_m)
     ground_truth: list[GroundTruthEvent],
-    meta: dict[str, Any],
+    session: RecordedSession,
     engine: SyncEngine,
+    *,
+    simulator_truth: bool = False,
 ) -> list[float]:
     if not detections or not ground_truth:
         return []
 
-    truth_phones = meta.get("truth", {}).get("phones") if isinstance(meta.get("truth"), dict) else None
-    ref = engine.ref_phone_id
-    has_gt_times = all(gt.t_s is not None for gt in ground_truth)
+    truth_times = [gt.t_s for gt in ground_truth if gt.t_s is not None]
+    if not truth_times:
+        # With sparse ground truth, a missing or extra detection makes order ambiguous.
+        if len(detections) != len(ground_truth):
+            return []
+        return [
+            math.hypot(est_x - gt.x_m, est_y - gt.y_m)
+            for (_, est_x, est_y), gt in zip(detections, ground_truth)
+        ]
 
-    det_times: list[float] | None = None
-    if isinstance(truth_phones, dict) and ref in truth_phones and has_gt_times:
-        mapped: list[float] = []
-        for t0, _, _ in detections:
-            n_loc = engine.to_local(ref, t0)
-            if n_loc is None:
-                mapped = []
-                break
-            mapped.append(_sim_true_time(truth_phones[ref], n_loc))
-        if mapped:
-            det_times = mapped
-    elif has_gt_times:
-        # Use direct timestamp matching only when CSV/meta timestamps share the engine's clock epoch.
-        if any(abs(gt.t_s - t0) <= MATCH_WINDOW_S for gt in ground_truth for t0, _, _ in detections if gt.t_s is not None):
-            det_times = [t0 for t0, _, _ in detections]
+    if simulator_truth:
+        ref = engine.ref_phone_id
+        truth_phone = session.meta["truth"].get("phones", {}).get(ref)
+        if truth_phone is None:
+            return []
+    else:
+        # t_s is measured from the first sample of the same track in every sweep.
+        ref = min(session.slices)
+        track = session.slices[ref]
 
-    if det_times is not None:
-        matched: set[int] = set()
-        errors: list[float] = []
-        for t_det, (_, est_x, est_y) in zip(det_times, detections):
-            idx = min(range(len(ground_truth)), key=lambda i: abs((ground_truth[i].t_s or 0.0) - t_det))
-            gt = ground_truth[idx]
-            if gt.t_s is None or abs(gt.t_s - t_det) > MATCH_WINDOW_S or idx in matched:
-                continue
-            matched.add(idx)
-            errors.append(math.hypot(est_x - gt.x_m, est_y - gt.y_m))
-        return errors
+    timed_detections: list[tuple[float, float, float]] = []
+    for t0, x, y in detections:
+        sample = engine.to_local(ref, t0)
+        if sample is not None:
+            t = true_time(truth_phone, sample) if simulator_truth else (sample - track.start_sample_index) / track.sample_rate
+            timed_detections.append((t, x, y))
+    if not timed_detections:
+        return []
 
-    # Chronological fallback when ground truth has no compatible timestamps.
+    offsets = np.abs(np.asarray(timed_detections)[:, :1] - truth_times)
+    # One invalid pair must cost more than any assignment of valid pairs.
+    invalid = (min(offsets.shape) + 1) * MATCH_WINDOW_S
+    det_ids, truth_ids = linear_sum_assignment(np.where(offsets <= MATCH_WINDOW_S, offsets, invalid))
     return [
-        math.hypot(est_x - gt.x_m, est_y - gt.y_m)
-        for (_, est_x, est_y), gt in zip(detections, ground_truth)
+        math.hypot(timed_detections[i][1] - ground_truth[j].x_m, timed_detections[i][2] - ground_truth[j].y_m)
+        for i, j in zip(det_ids, truth_ids) if offsets[i, j] <= MATCH_WINDOW_S
     ]
 
 
@@ -338,6 +339,17 @@ def sweep_recording(
     ground_truth = load_ground_truth(session.meta, truth_csv=truth_csv)
     if not ground_truth:
         raise ValueError(f"No ground truth events found in '{npz_path}' or truth CSV")
+    timed_trials = sum(gt.t_s is not None for gt in ground_truth)
+    if timed_trials and (
+        timed_trials != len(ground_truth)
+        or any(not math.isfinite(gt.t_s) for gt in ground_truth if gt.t_s is not None)
+    ):
+        raise ValueError("Ground truth needs a finite t_s for every event or no event times at all")
+    simulator_truth = (
+        truth_csv is None
+        and not (session.meta.get("clap_points") or session.meta.get("points"))
+        and isinstance(session.meta.get("truth"), dict)
+    )
 
     min_phones = min(3, len(session.phones))
     sync_cache: dict[tuple[float, float], SyncEngine] = {}
@@ -401,7 +413,7 @@ def sweep_recording(
             if res is not None:
                 detections.append((t0, res.x_m, res.y_m))
 
-        errors = _match_errors(detections, ground_truth, session.meta, engine)
+        errors = _match_errors(detections, ground_truth, session, engine, simulator_truth=simulator_truth)
         total = len(ground_truth)
         missed = total - len(errors)
         runtime_ms = (time.perf_counter() - combo_t0) * 1000.0
@@ -451,18 +463,21 @@ def format_tuning_markdown(rows: list[TuneRow], *, recording_name: str, elapsed_
 def main(argv: list[str] | None = None, *, grid: list[TuneParams] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Bounded grid-search DSP parameter tuner for .npz recordings.")
     parser.add_argument("recording", help="Path to v2 .npz recording")
-    parser.add_argument("--truth", default=None, help="Optional CSV with ground-truth positions")
+    parser.add_argument(
+        "--truth", default=None,
+        help="Ground-truth CSV with t_s in seconds from the first sample of the first phone track (by ID)",
+    )
     parser.add_argument("--out", default="analysis", help="Output directory for tuning-<stem>.md")
     parser.add_argument("--max-combos", type=int, default=MAX_COMBOS, help=f"Maximum combinations (<= {MAX_COMBOS})")
     args = parser.parse_args(argv)
 
     rec_path = Path(args.recording)
-    rows, elapsed_s = sweep_recording(
-        rec_path,
-        truth_csv=args.truth,
-        grid=grid,
-        max_combos=args.max_combos,
-    )
+    try:
+        rows, elapsed_s = sweep_recording(
+            rec_path, truth_csv=args.truth, grid=grid, max_combos=args.max_combos,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     md = format_tuning_markdown(rows, recording_name=rec_path.name, elapsed_s=elapsed_s)
     print(md)
 

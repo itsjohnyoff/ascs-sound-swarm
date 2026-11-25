@@ -31,6 +31,8 @@ def test_diagnostics_generates_all_three_plots_on_sim_recording(tmp_path: Path) 
     assert set(diag.plot_paths.keys()) == {"chirp_envelope", "gcc_pairs", "triangle_residuals"}
     for path in diag.plot_paths.values():
         _assert_valid_svg(path)
+    for name in ("gcc_pairs", "triangle_residuals"):
+        assert "Raw aligned window" in diag.plot_paths[name].read_text(encoding="utf-8")
 
     assert len(diag.pair_tdoas_ms) == 6
     assert len(diag.triangle_residuals_ms) == 4

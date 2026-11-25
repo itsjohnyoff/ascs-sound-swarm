@@ -263,14 +263,16 @@ def _plot_gcc_pairs(
     ncols = min(3, n_pairs)
     nrows = math.ceil(n_pairs / ncols)
     cell_w, cell_h = 340.0, 230.0
-    header_h = 34.0
+    header_h = 50.0
     width = ncols * cell_w + 16.0
     height = header_h + nrows * cell_h + 10.0
 
     est_str = f"({est_xy[0]:.2f}, {est_xy[1]:.2f}) m" if est_xy is not None else "N/A"
     elems: list[str] = [
         f'<text class="suptitle" x="{width * 0.5:.1f}" y="22" text-anchor="middle">'
-        f"{escape(f'Event #{event_index} GCC-PHAT Pairs — est={est_str} (c={c:.1f} m/s)')}</text>"
+        f"{escape(f'Event #{event_index} GCC-PHAT Pairs')}</text>",
+        f'<text class="label" x="{width * 0.5:.1f}" y="40" text-anchor="middle">'
+        f"{escape(f'Raw aligned window — est={est_str} (c={c:.1f} m/s)')}</text>",
     ]
 
     if not pairs:
@@ -355,7 +357,7 @@ def _plot_triangle_residuals(
     px0, py0, px1, py1 = 76.0, 56.0, width - 28.0, height - 56.0
     elems: list[str] = [
         f'<text class="suptitle" x="{width * 0.5:.1f}" y="24" text-anchor="middle">'
-        f"{escape(f'Event #{event_index} Triangle Cycle-Consistency Residuals')}</text>"
+        f"{escape(f'Event #{event_index} Triangle Residuals — Raw aligned window')}</text>"
     ]
 
     if not triangle_residuals_ms:
@@ -396,7 +398,7 @@ def _plot_triangle_residuals(
             py0 + 8.0,
             [
                 ("#16a34a", "6,3", "0.5 ms reference"),
-                ("#f59e0b", "6,3", f"cycle_threshold ({thresh_ms:.2f} ms)"),
+                ("#f59e0b", "6,3", f"Localizer threshold for reference ({thresh_ms:.2f} ms)"),
             ],
         )
 
@@ -498,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
     diag = generate_event_diagnostics(args.recording, event_index=args.event, out_dir=args.out)
     max_tri = max(diag.triangle_residuals_ms.values()) if diag.triangle_residuals_ms else None
     tri_str = f"{max_tri:.3f} ms" if max_tri is not None else "N/A (<3 phones)"
-    print(f"Event #{diag.event_index} ({diag.kind}, t0={diag.t0_s:.3f}s) est_xy={diag.est_xy} max_tri={tri_str}")
+    print(f"Event #{diag.event_index} ({diag.kind}, t0={diag.t0_s:.3f}s) est_xy={diag.est_xy} raw-window max_tri={tri_str}")
     for key, path in diag.plot_paths.items():
         print(f"  {key}: {path}")
     return 0

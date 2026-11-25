@@ -51,3 +51,21 @@ Soak (Gate 3 prep, about 11 min): `python scripts/soak.py --minutes 10 --out soa
 2. Known-point check first: clap at a measured point, log it as the known point. It must be < 0.5 m.
 3. For each of the 10 positions: set the true point, chirp before the trial, make the sound, pick the matching detection or mark it missed.
 4. Export the CSV (`/api/eval/export.csv`).
+
+### Tune a recorded run
+
+Add a `t_s` column to the judge export and mark each sound's onset in seconds from the first sample of the first phone track by sorted phone ID. Use the same track for every trial, including trials marked missed, and keep that phone recording and synchronized throughout the run. The exported `timestamp_s` records when a result was published or marked missed.
+
+To read onset times in an audio editor, export that phone's waveform with Python.
+
+```python
+from backend.dsp.replay import load_recording_npz
+from scipy.io.wavfile import write
+
+recording = load_recording_npz("data/recordings/<name>.npz")
+phone = recording.slices[min(recording.slices)]
+write("judge-reference.wav", phone.sample_rate, phone.samples_f32)
+```
+
+Run `python -m backend.dsp.tune data/recordings/<name>.npz --truth judge-eval.csv`.
+For an untimed list of positions, a sweep row can only score errors when the detection and trial counts agree. Rows with unequal counts report every trial as unmatched. Use timed annotations if a recording may contain extra detections or missed trials.

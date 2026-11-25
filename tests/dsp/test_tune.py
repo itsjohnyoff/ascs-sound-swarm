@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +13,7 @@ from backend.dsp.tune import (
     GroundTruthEvent,
     TuneParams,
     TuneRow,
+    _match_errors,
     default_grid,
     format_tuning_markdown,
     load_ground_truth,
@@ -26,7 +29,7 @@ def test_load_ground_truth_csv_and_meta(tmp_path: Path) -> None:
     with judge_csv.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
             fh,
-            fieldnames=["trial_idx", "label", "expected_class", "gt_x_m", "gt_y_m", "timestamp_s"],
+            fieldnames=["trial_idx", "label", "expected_class", "gt_x_m", "gt_y_m", "timestamp_s", "t_s"],
         )
         writer.writeheader()
         writer.writerow(
@@ -36,7 +39,8 @@ def test_load_ground_truth_csv_and_meta(tmp_path: Path) -> None:
                 "expected_class": "clap",
                 "gt_x_m": "3.0",
                 "gt_y_m": "2.5",
-                "timestamp_s": "14.0",
+                "timestamp_s": "1760000000.8",
+                "t_s": "14.0",
             }
         )
         writer.writerow(
@@ -46,13 +50,18 @@ def test_load_ground_truth_csv_and_meta(tmp_path: Path) -> None:
                 "expected_class": "drone",
                 "gt_x_m": "5.5",
                 "gt_y_m": "3.5",
-                "timestamp_s": "16.5",
+                "timestamp_s": "1760000003.3",
+                "t_s": "16.5",
             }
         )
     gt_judge = load_ground_truth({}, truth_csv=judge_csv)
     assert len(gt_judge) == 2
     assert gt_judge[0] == GroundTruthEvent(x_m=3.0, y_m=2.5, t_s=14.0, kind="clap", label="center")
     assert gt_judge[1] == GroundTruthEvent(x_m=5.5, y_m=3.5, t_s=16.5, kind="drone", label="corner")
+
+    judge_csv.write_text("trial_idx,gt_x_m,gt_y_m,timestamp_s\n1,3,2,1760000000.8\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="recording-relative t_s"):
+        load_ground_truth({}, truth_csv=judge_csv)
 
     # 2. Minimal x_m,y_m CSV format
     min_csv = tmp_path / "minimal.csv"
@@ -94,6 +103,19 @@ def test_load_ground_truth_csv_and_meta(tmp_path: Path) -> None:
     assert len(gt_sim) == 2
     assert [e.kind for e in gt_sim] == ["clap", "drone"]
     assert (gt_sim[0].x_m, gt_sim[0].y_m, gt_sim[0].t_s) == (3.0, 2.5, 14.0)
+
+
+def test_recording_time_matching_keeps_a_missed_early_trial_unmatched() -> None:
+    session = SimpleNamespace(
+        meta={}, slices={"p1": SimpleNamespace(start_sample_index=480000, sample_rate=48000)},
+    )
+    engine = SimpleNamespace(ref_phone_id="p1", to_local=lambda _pid, t: t * 48000)
+    ground_truth = [GroundTruthEvent(x, 0.0, t_s=t) for x, t in [(1.0, 1.0), (4.0, 3.0), (9.0, 3.4)]]
+    detections = [(13.0, 4.0, 0.0), (13.19, 9.0, 0.0)]
+
+    assert _match_errors(detections, ground_truth, session, engine) == [0.0, 0.0]
+    untimed = [GroundTruthEvent(gt.x_m, gt.y_m) for gt in ground_truth]
+    assert _match_errors(detections, untimed, session, engine) == []
 
 
 def test_sweep_caps_grid_at_200(tmp_path: Path) -> None:
@@ -164,7 +186,17 @@ def test_tune_cli_on_sim_recording(tmp_path: Path, capsys: pytest.CaptureFixture
     assert default_row.missed == 0
     assert default_row.total == 10
 
-    rc = main([str(npz_path), "--out", str(tmp_path)], grid=small_grid)
+    truth = json.loads(str(rec["meta"]))["truth"]
+    first_phone = truth["phones"][min(truth["phones"])]
+    judge_csv = tmp_path / "judge.csv"
+    with judge_csv.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["trial_idx", "gt_x_m", "gt_y_m", "timestamp_s", "t_s"])
+        for i, event in enumerate((e for e in truth["events"] if e["kind"] != "chirp"), start=1):
+            offset = (event["t_s"] - first_phone["start_s"]) * (1 + first_phone["drift_ppm"] * 1e-6)
+            writer.writerow([i, event["x_m"], event["y_m"], 1760000000 + event["t_s"], offset])
+
+    rc = main([str(npz_path), "--truth", str(judge_csv), "--out", str(tmp_path)], grid=small_grid)
     assert rc == 0
     out_md = tmp_path / "tuning-sim_test.md"
     assert out_md.exists()
