@@ -9,8 +9,24 @@ import numpy as np
 from shared.protocol import LocalizationResult, PhoneConfig, RoomConfig
 from backend.dsp.clock import ClockModel
 from backend.dsp.localizer import AcousticLocalizer2D
-from backend.dsp.sync import SyncEngine
+from backend.dsp.sync import CLIP_THRESHOLD, SyncEngine, is_window_clipped
 from backend.dsp.trigger import AdaptiveEventTrigger, EventWindow, OnsetDetector
+
+
+def _filter_clipped_phones(
+    windows: dict[str, np.ndarray],
+    clip_threshold: float = CLIP_THRESHOLD,
+) -> dict[str, np.ndarray]:
+    """Drop clipped phones when at least 3 unclipped phones remain for 2D TDOA."""
+    clean = {
+        pid: arr
+        for pid, arr in windows.items()
+        if not is_window_clipped(arr, clip_threshold=clip_threshold)
+    }
+    if len(clean) >= 3:
+        return clean
+    # shortcut: retain phones when dropping clipped ones would leave <3 phones for 2D TDOA
+    return windows
 
 
 class LocalizationPipeline:
@@ -42,6 +58,9 @@ class LocalizationPipeline:
         n_samples = min(len(arr) for arr in eligible.values())
         if n_samples < 8:
             return None
+
+        eligible = {pid: arr[:n_samples] for pid, arr in eligible.items()}
+        eligible = _filter_clipped_phones(eligible)
 
         if kind == "transient":
             frames = [{pid: arr[:n_samples] for pid, arr in eligible.items()}]
@@ -82,6 +101,20 @@ class LocalizationPipeline:
         event = self._trigger.detect(aligned_audio, fs=fs)
         if event is None:
             return None
+
+        raw_pids = list(event.frames[0].keys())
+        if event.kind == "transient":
+            raw_event = event.frames[0]
+        else:
+            n_s = min(len(aligned_audio[pid]) for pid in raw_pids)
+            raw_event = {pid: aligned_audio[pid][:n_s] for pid in raw_pids}
+        kept = _filter_clipped_phones(raw_event)
+        if len(kept) < len(raw_event):
+            event.frames = [
+                {pid: samples for pid, samples in frame.items() if pid in kept}
+                for frame in event.frames
+            ]
+
         self._event_counter += 1
         event_id = f"evt-{self._event_counter:04d}"
         return self._localizer.localize_event(
@@ -94,4 +127,4 @@ class LocalizationPipeline:
         )
 
 
-__all__ = ["ClockModel", "SyncEngine", "OnsetDetector", "LocalizationPipeline"]
+__all__ = ["ClockModel", "SyncEngine", "OnsetDetector", "LocalizationPipeline", "is_window_clipped"]
