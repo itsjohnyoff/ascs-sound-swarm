@@ -1,5 +1,6 @@
 import type { Detection, Phone, Room } from "../shared/types";
 import { gradeResidual } from "./readiness";
+import { isRoomPoint } from "./trialFlow";
 
 export interface MapModel {
   room: Room; phones: Phone[]; detections: Detection[]; // newest last
@@ -31,6 +32,7 @@ export class FloorMap {
     canvas.addEventListener("pointerdown", (e) => this.down(e));
     canvas.addEventListener("pointermove", (e) => this.move(e));
     canvas.addEventListener("pointerup", (e) => this.up(e));
+    canvas.addEventListener("pointercancel", () => { this.drag = null; });
     new ResizeObserver(() => { this.dirty = true; }).observe(canvas);
     const loop = () => {
       if (this.dirty) { const t0 = performance.now(); this.draw(); this.dirty = false; this.onDraw(t0, performance.now() - t0); }
@@ -56,7 +58,7 @@ export class FloorMap {
 
   private down(e: PointerEvent) {
     const p = this.toRoom(e);
-    if (this.judgeMode) { this.onPick(p.x, p.y); return; }
+    if (this.judgeMode) return;
     this.drag = this.hit(p.x, p.y);
     if (this.drag) this.canvas.setPointerCapture(e.pointerId);
   }
@@ -70,7 +72,13 @@ export class FloorMap {
     this.dirty = true;
   }
   private up(e: PointerEvent) {
-    if (!this.drag || !this.model) return;
+    if (!this.model) return;
+    if (this.judgeMode) {
+      const p = this.toRoom(e);
+      if (isRoomPoint(this.model.room, p.x, p.y)) this.onPick(p.x, p.y);
+      return;
+    }
+    if (!this.drag) return;
     const d = this.drag; this.drag = null;
     const p = this.toRoom(e);
     const x = Math.round(Math.min(Math.max(p.x, 0), this.model.room.width_m) * 100) / 100;

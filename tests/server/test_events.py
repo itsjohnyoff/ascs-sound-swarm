@@ -7,6 +7,7 @@ import math
 import numpy as np
 
 from backend.server.events import EventLoop
+from backend.server.recording import Recording
 from backend.server.session import Session
 from shared.protocol import decode_audio_frame, encode_audio_frame
 from sim.room import DEFAULT_ROOM, SimEvent, default_phones, simulate, true_time
@@ -41,9 +42,11 @@ class Swarm:
                 self.pos[pid] = k + FRAME
 
 
-def _run(rec, events_until, *, tick=0.1):
+def _run(rec, events_until, *, tick=0.1, capture=None):
     async def go():
         session = Session()
+        if capture is not None:
+            session.recording = Recording(capture, session.room)
         sent = []
         loop = EventLoop(session, sent.append)
         swarm = Swarm(session, rec)
@@ -79,6 +82,29 @@ def test_one_clap_gives_exactly_one_detection_and_chirp_gives_none():
     assert d["kind"] == "transient" and d["update_seq"] == 0
     assert math.hypot(d["x_m"] - 3.0, d["y_m"] - 2.5) < 0.3
     assert d["event_id"] in session.detections
+
+
+def test_capture_keeps_calibration_and_clap_broadcast_evidence(tmp_path):
+    path = tmp_path / "gate1.npz"
+    rec = _rec([SimEvent(3.0, 3.0, 2.5, "clap")], 5.0)
+    session, dets = _run(rec, 4.8, capture=path)
+    recording = session.recording
+    try:
+        recording.save()
+    finally:
+        recording.close()
+    with np.load(path, allow_pickle=False) as archive:
+        meta = json.loads(archive["meta"].item())
+
+    calibration, = meta["calibrations"]
+    assert calibration["success"]
+    assert calibration["synced_count"] == 4
+    assert set(calibration["per_phone"]) == set(session.phones)
+    timing, = meta["event_timings"]
+    assert timing["event_id"] == dets[0]["event_id"]
+    assert timing["sound_class"] == dets[0]["sound_class"]
+    assert 0 <= timing["onset_offset_s"] <= timing["broadcast_offset_s"]
+    assert timing["broadcast_offset_s"] > calibration["offset_s"]
 
 
 def test_drone_is_sustained_and_reemits_with_same_event_id():

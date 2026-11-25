@@ -43,7 +43,8 @@ export function nextAction(s: SessionState | null, online: boolean, phase: "idle
   if (phase !== "idle") return null;
   const live = s.phones.filter((p) => p.connected);
   if (live.length < MIN_PHONES) return "qrBtn";
+  if (s.gdop_warning) return null;
   const synced = live.filter((p) => p.sync_state === "synced" || p.sync_state === "drifting");
-  if (synced.length < live.length) return "calBtn";
+  if (synced.length < live.length || synced.some((p) => (p.residual_ms ?? 0) >= 1)) return "calBtn";
   return "startBtn";
 }

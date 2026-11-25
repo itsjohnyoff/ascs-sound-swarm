@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+import json
 import math
 import subprocess
 import sys
@@ -24,11 +25,16 @@ def send_hello(socket, pid, fs=8000, x=0.5, y=0.5):
 
 def test_recording_lifecycle_empty_and_no_overwrite(tmp_path):
     with TestClient(create_app(recordings_dir=tmp_path)) as client:
+        assert client.get("/api/record/status").json() == {"status": "idle", "path": None}
         assert client.post("/api/record/stop").status_code == 409
         assert client.post("/api/record/start", json={"name": "../escape"}).status_code == 422
         assert client.post("/api/record/start").status_code == 200
+        assert client.get("/api/record/status").json() == {
+            "status": "recording", "path": str(tmp_path / "spike-01.npz"),
+        }
         assert client.post("/api/record/start", json={"name": "other"}).status_code == 409
         assert client.post("/api/record/stop").status_code == 409
+        assert client.get("/api/record/status").json() == {"status": "idle", "path": None}
         assert list(tmp_path.iterdir()) == []
 
         existing = tmp_path / "spike-01.npz"
@@ -62,12 +68,63 @@ def test_recording_archives_clock_epochs_and_ignores_retransmissions(tmp_path):
         assert list(recording.slices) == ["nw"]
         assert recording.slices["nw"].start_sample_index == 100
         assert len(recording.slices["nw"].samples_f32) == 8
+        assert recording.meta["frame_stats"]["nw"] == {
+            "received_frames": 4, "dropped_frames": 0, "sample_gaps": 0, "missing_samples": 0,
+            "segments": 4, "disconnects": 2, "clock_jumps": 1,
+        }
         with np.load(recording.path, allow_pickle=False) as archive:
             segments = recording.meta["segments"]["nw"]
             assert [s["start_index"] for s in segments] == [100, 2, 120, 200]
             np.testing.assert_array_equal(archive[segments[1]["samples_key"]], 0.5)
             np.testing.assert_array_equal(archive[segments[2]["samples_key"]], 0.125)
             np.testing.assert_array_equal(archive[segments[3]["samples_key"]], -0.25)
+
+
+def test_recording_frame_stats_cover_capture_and_sequence_wrap(tmp_path):
+    samples = np.zeros(8)
+    with TestClient(create_app(recordings_dir=tmp_path)) as client:
+        with client.websocket_connect("/ws/phone/nw") as phone:
+            send_hello(phone, "nw")
+            phone.send_bytes(encode_audio_frame(samples, 0xFFFFFFFA, 8000, 0))
+            send_hello(phone, "nw")
+            assert client.post("/api/record/start").status_code == 200
+            for seq, index in [(0xFFFFFFFE, 32), (0, 48), (0, 48), (1, 60), (4, 68)]:
+                phone.send_bytes(encode_audio_frame(samples, seq, 8000, index))
+            send_hello(phone, "nw")
+            assert client.post("/api/record/stop").status_code == 200
+
+    recording = load_recording_npz(tmp_path / "spike-01.npz")
+    assert recording.meta["frame_stats"]["nw"] == {
+        "received_frames": 4, "dropped_frames": 4, "sample_gaps": 2, "missing_samples": 12,
+        "segments": 1, "disconnects": 0, "clock_jumps": 0,
+    }
+    assert np.count_nonzero(~recording.slices["nw"].valid_mask) == 12
+
+    log_path = tmp_path / "LOG.md"
+    log_path.write_text("| date | file | what | result |\n", encoding="utf-8")
+    command = [sys.executable, "-m", "scripts.recording_summary", str(recording.path)]
+    log_command = [*command, "--append-log", str(log_path), "--date", "2026-11-26",
+                   "--what", "Gate 1", "--result", "miss | investigate\nclap timing"]
+    result = subprocess.run(log_command, capture_output=True, text=True, check=True, timeout=20)
+    assert "nw: 4/8 dropped (50.000%)" in result.stdout
+    assert "2 sample gaps (12 samples)" in result.stdout
+    assert log_path.read_text(encoding="utf-8").splitlines()[1].startswith(
+        "| 2026-11-26 | spike-01.npz | Gate 1 | miss \\| investigate clap timing. nw: "
+    )
+    retry = subprocess.run(log_command, capture_output=True, text=True, timeout=20)
+    assert retry.returncode == 2 and "already has a row" in retry.stderr
+    assert len(log_path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_recording_summary_requires_frame_stats(tmp_path):
+    path = tmp_path / "legacy.npz"
+    np.savez(path, meta=np.asarray(json.dumps({"room": {}, "phones": {}})))
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.recording_summary", str(path)],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 2
+    assert "does not contain frame counts" in result.stderr
 
 
 def test_gate0_cli_replays_three_chirps_from_capture_longer_than_ring(tmp_path):
@@ -127,6 +184,7 @@ def test_failed_publish_keeps_capture_for_retry(tmp_path):
         path = tmp_path / "spike-01.npz"
         path.write_bytes(b"existing")
         assert client.post("/api/record/stop").status_code == 409
+        assert client.get("/api/record/status").json() == {"status": "awaiting_save", "path": str(path)}
         assert path.read_bytes() == b"existing"
         path.unlink()
 

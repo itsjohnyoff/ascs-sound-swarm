@@ -2,8 +2,8 @@
 
 Per phone: actual sample rate, gaps in sample_index, chirps found, clock-fit residual,
 drift. Per clap: measured TDOA per pair vs TDOA predicted from the taped clap point.
-Clap points come from meta["clap_points"] ([{x_m, y_m}], in clap order) or, for
-simulated files, from meta["truth"]["events"].
+Clap points come from an optional --clap-points JSON file, meta["clap_points"]
+([{x_m, y_m}], in clap order), or meta["truth"]["events"] in simulation.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from itertools import combinations
 from pathlib import Path
 
@@ -32,8 +32,12 @@ class PhoneReport:
     residual_ms: float | None
     drift_ppm: float | None
     clipped_fraction: float
+    fit_chirps: int
     agc_gated: bool = False
     agc_reason: str = ""
+    dropped_frames: int | None = None
+    segments: int = 1
+    disconnects: int = 0
 
 
 @dataclass
@@ -53,6 +57,29 @@ class SpikeReport:
     ref_phone_id: str | None
     phones: dict[str, PhoneReport]
     claps: list[ClapReport]
+    taped_claps: int = 0
+
+    @property
+    def gate_failures(self) -> list[str]:
+        failures = []
+        if not 2 <= len(self.phones) <= 4:
+            failures.append(f"Capture needs 2–4 phones with audio, got {len(self.phones)}")
+        for pid, phone in sorted(self.phones.items()):
+            if phone.chirps < 3 or phone.fit_chirps < 3:
+                failures.append(f"{pid}: only {phone.fit_chirps} chirps in the clock fit ({phone.chirps} detected), need 3")
+            if phone.residual_ms is None or not phone.residual_ms < 1.0:
+                failures.append(f"{pid}: residual {phone.residual_ms} ms, need < 1 ms")
+            if phone.gap_count:
+                failures.append(f"{pid}: {phone.gap_count} sample-index gap(s)")
+            if phone.dropped_frames:
+                failures.append(f"{pid}: {phone.dropped_frames} dropped frame(s)")
+            if phone.segments > 1 or phone.disconnects:
+                failures.append(f"{pid}: discontinuous capture ({phone.segments} segments, {phone.disconnects} disconnects)")
+            if phone.clipped_fraction >= 0.01:
+                failures.append(f"{pid}: {100 * phone.clipped_fraction:.2f}% clipped, need < 1%")
+            if phone.agc_gated:
+                failures.append(f"{pid}: AGC/gate flagged ({phone.agc_reason})")
+        return failures
 
 
 def _gap_count(valid: np.ndarray | None) -> int:
@@ -120,7 +147,7 @@ def _clap_points(meta: dict) -> list[tuple[float, float]]:
     return [(e["x_m"], e["y_m"]) for e in events if e["kind"] == "clap"]
 
 
-def analyze(path: str | Path) -> SpikeReport:
+def analyze(path: str | Path, *, clap_points: list[tuple[float, float]] | None = None) -> SpikeReport:
     session = load_recording_npz(path)
     slices = {pid: PhoneAudioSlice(pid, s.samples_f32, s.start_sample_index, s.sample_rate, s.valid_mask)
               for pid, s in session.slices.items()}
@@ -135,21 +162,29 @@ def analyze(path: str | Path) -> SpikeReport:
     for pid, s in slices.items():
         model = engine.clock(pid)
         agc_gated, agc_reason = _detect_agc_or_gating(s.samples_f32, s.sample_rate, s.valid_mask)
+        stats = session.meta.get("frame_stats", {}).get(pid, {})
+        segments = session.meta.get("segments", {}).get(pid, ())
+        valid_samples = s.samples_f32 if s.valid_mask is None else s.samples_f32[s.valid_mask]
         phones[pid] = PhoneReport(
-            fs=s.sample_rate, gap_count=_gap_count(s.valid_mask), chirps=chirps.get(pid, 0),
-            residual_ms=None if model is None else round(model.residual_ms, 4),
+            fs=s.sample_rate, gap_count=max(_gap_count(s.valid_mask), stats.get("sample_gaps", 0)),
+            chirps=chirps.get(pid, 0), fit_chirps=0 if model is None else model.n_points,
+            residual_ms=None if model is None else model.residual_ms,
             drift_ppm=None if model is None else round(model.drift_ppm, 2),
-            clipped_fraction=float(np.mean(np.abs(s.samples_f32) >= 0.99)),
+            clipped_fraction=float(np.mean(np.abs(valid_samples) >= 0.99)) if len(valid_samples) else 0.0,
             agc_gated=agc_gated, agc_reason=agc_reason,
+            dropped_frames=stats.get("dropped_frames"), segments=stats.get("segments", len(segments) or 1),
+            disconnects=stats.get("disconnects", 0),
         )
 
     c = speed_of_sound(session.room.temperature_c)
-    points = _clap_points(session.meta)
+    points = _clap_points(session.meta) if clap_points is None else clap_points
     claps = []
     detections = [d for d in find_events_offline(slices, session.phones, session.room, engine=engine, min_phones=2)
                   if d.kind == "transient"]
+    # Assigning by order after an extra or missed transient could pair a clap with the wrong point.
+    points_match = len(points) == len(detections)
     for i, det in enumerate(detections):
-        point = points[i] if i < len(points) else None
+        point = points[i] if points_match else None
         rep = ClapReport(det.t0, point)
         if point is not None:
             for a, b in combinations(sorted(det.aligned), 2):
@@ -160,23 +195,27 @@ def analyze(path: str | Path) -> SpikeReport:
                 _, _, tau, _ = compute_gcc_phat(det.aligned[a], det.aligned[b], fs=TARGET_FS, max_tau_s=max_tau)
                 rep.pair_errors_ms[f"{a}-{b}"] = round(abs(tau - (da - db) / c) * 1e3, 4)
         claps.append(rep)
-    return SpikeReport(str(path), engine.ref_phone_id, phones, claps)
+    return SpikeReport(str(path), engine.ref_phone_id, phones, claps, taped_claps=len(points))
 
 
 def format_report(r: SpikeReport) -> str:
     lines = [f"# Spike report: {r.path}", "", f"Reference phone: {r.ref_phone_id}", "",
-             "| phone | fs | gaps | chirps | residual ms | drift ppm | clipped % | AGC/gate |",
+             "| phone | fs | gaps | chirps detected/fit | residual ms | drift ppm | clipped % | AGC/gate |",
              "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for pid, p in sorted(r.phones.items()):
         agc_col = f"FLAG ({p.agc_reason})" if p.agc_gated else "OK"
-        lines.append(f"| {pid} | {p.fs} | {p.gap_count} | {p.chirps} | {p.residual_ms} | {p.drift_ppm} | "
+        residual = "—" if p.residual_ms is None else f"{p.residual_ms:.4f}"
+        lines.append(f"| {pid} | {p.fs} | {p.gap_count} | {p.chirps}/{p.fit_chirps} | {residual} | {p.drift_ppm} | "
                      f"{100 * p.clipped_fraction:.2f} | {agc_col} |")
     lines += ["", "| clap | t global s | point | max pair TDOA error ms |", "| --- | --- | --- | --- |"]
     for i, c in enumerate(r.claps, 1):
         lines.append(f"| {i} | {c.t_global_s:.3f} | {c.point} | {c.max_tdoa_error_ms:.3f} |")
-    residuals = [p.residual_ms for p in r.phones.values() if p.residual_ms is not None]
-    ok = bool(residuals) and len(residuals) == len(r.phones) and max(residuals) < 1.0
-    lines += ["", f"Gate 0 (residual < 1 ms on every phone): {'PASS' if ok else 'FAIL'}"]
+    if r.taped_claps and r.taped_claps != len(r.claps):
+        lines += ["", f"TDOA comparison needs matching counts. Found {len(r.claps)} transient events for {r.taped_claps} taped claps."]
+    failures = r.gate_failures
+    lines += ["", f"Gate 0: {'FAIL' if failures else 'PASS'}"]
+    if failures:
+        lines += ["", *(f"- {failure}" for failure in failures)]
     return "\n".join(lines)
 
 
@@ -197,19 +236,37 @@ def _plot(r: SpikeReport, out_dir: Path) -> None:
     fig.savefig(out_dir / f"{Path(r.path).stem}-waveforms.png", dpi=80)
 
 
+def _read_clap_points(path: Path) -> list[tuple[float, float]]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("expected an array of {x_m, y_m} points in clap order")
+    points = []
+    for i, point in enumerate(raw, 1):
+        xy = [point.get(axis) for axis in ("x_m", "y_m")] if isinstance(point, dict) else []
+        if len(xy) != 2 or any(type(n) not in (int, float) or not math.isfinite(n) for n in xy):
+            raise ValueError(f"point {i} needs finite numeric x_m and y_m coordinates")
+        points.append((float(xy[0]), float(xy[1])))
+    return points
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("path")
+    ap.add_argument("--clap-points", type=Path, help="JSON array of {x_m, y_m} taped points in clap order")
     ap.add_argument("--plots", default="analysis/plots")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
-    report = analyze(args.path)
+    try:
+        points = _read_clap_points(args.clap_points) if args.clap_points is not None else None
+    except (OSError, ValueError, OverflowError) as exc:
+        ap.error(f"--clap-points: {exc}")
+    report = analyze(args.path, clap_points=points)
     if args.json:
-        print(json.dumps(report, default=lambda o: o.__dict__, indent=2))
+        print(json.dumps({**asdict(report), "gate_failures": report.gate_failures}, indent=2))
     else:
         print(format_report(report))
     _plot(report, Path(args.plots))
-    return 0
+    return int(bool(report.gate_failures))
 
 
 if __name__ == "__main__":

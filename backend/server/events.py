@@ -10,6 +10,7 @@ analysis and the benchmark all run the exact same logic.
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -46,6 +47,7 @@ def max_spread_s(room: RoomConfig) -> float:
 class PendingEvent:
     t0: float
     onsets: dict[str, float] = field(default_factory=dict)
+    onset_monotonic_s: float | None = None
 
 
 class EventGrouper:
@@ -58,17 +60,19 @@ class EventGrouper:
         self._recent: list[PendingEvent] = []  # emitted, absorbs late onsets of the same sound
         self.hold_until = -math.inf  # a sustained sound is still playing until this global time
 
-    def add(self, phone_id: str, t: float) -> None:
+    def add(self, phone_id: str, t: float, onset_monotonic_s: float | None = None) -> None:
         if t < self.hold_until:
             return
         for ev in self._recent + self.pending:
             if abs(t - ev.t0) <= self.max_spread_s and phone_id not in ev.onsets:
                 ev.onsets[phone_id] = t
-                ev.t0 = min(ev.t0, t)
+                if t < ev.t0:
+                    ev.t0 = t
+                    ev.onset_monotonic_s = onset_monotonic_s
                 return
             if abs(t - ev.t0) <= self.max_spread_s and ev in self._recent:
                 return
-        self.pending.append(PendingEvent(t, {phone_id: t}))
+        self.pending.append(PendingEvent(t, {phone_id: t}, onset_monotonic_s))
 
     def hold(self, until: float) -> None:
         """Ignore onsets (and drop pending clusters) until a sustained sound has ended."""
@@ -285,14 +289,13 @@ class EventLoop:
                 continue
             fs = s.buffers[pid].sample_rate
             cutoff = s.calibration_ends.get(pid, -math.inf) + CHIRP_SUPPRESS_S * fs
-            for n in local:
+            for n, estimated_onset_s in local:
                 t = engine.to_global(pid, n) if n >= cutoff else None
                 if t is not None:
-                    self.grouper.add(pid, t)
+                    self.grouper.add(pid, t, estimated_onset_s)
 
     async def process_once(self) -> None:
         import asyncio
-        import time
 
         s = self.session
         if s.clock_epoch != self._epoch:  # new calibration: old onsets live on an old timeline
@@ -309,15 +312,15 @@ class EventLoop:
             buf = s.buffers.get(pid)
             return None if buf is None else engine.to_global(pid, buf.latest_sample_index)
 
-        jobs: list[tuple[str, float, EventKind | None, int, set[str]]] = []
+        jobs: list[tuple[str, float, EventKind | None, int, set[str], float | None]] = []
         sus = self._sustained
         if sus is not None:
             end = event_window(sus.t0, "sustained", sus.seq + 1)[1]
             if all((buffered_until(p) is not None and buffered_until(p) >= end) for p in sus.phones_used if p in s.buffers):
-                jobs.append((sus.event_id, sus.t0, "sustained", sus.seq + 1, sus.phones_used))
+                jobs.append((sus.event_id, sus.t0, "sustained", sus.seq + 1, sus.phones_used, None))
         for ev in self.grouper.pop_ready(buffered_until):
             self._counter += 1
-            jobs.append((f"evt-{self._counter:04d}", ev.t0, None, 0, set(synced)))
+            jobs.append((f"evt-{self._counter:04d}", ev.t0, None, 0, set(synced), ev.onset_monotonic_s))
         if not jobs:
             return
 
@@ -349,7 +352,7 @@ class EventLoop:
             })
 
         for job in jobs:
-            event_id, t0, kind, seq, result = await asyncio.to_thread(analyze, *job)
+            event_id, t0, kind, seq, result = await asyncio.to_thread(analyze, *job[:5])
             if s.clock_epoch != self._epoch:  # recalibrated meanwhile: drop stale results
                 return
             if kind == "sustained":
@@ -366,4 +369,16 @@ class EventLoop:
                     self._sustained = None
             if result is not None:
                 s.record_detection(result)
-                self.broadcast({"type": "detection", **result.model_dump(mode="json")})
+                payload = {"type": "detection", **result.model_dump(mode="json")}
+                broadcast_s = time.monotonic()
+                self.broadcast(payload)
+                recording = s.recording
+                onset_s = job[5]
+                if (kind == "transient" and recording is not None and recording.stopped_at_s is None
+                        and onset_s is not None and onset_s >= recording.started_monotonic_s):
+                    recording.event_timings.append({
+                        "event_id": event_id,
+                        "sound_class": result.sound_class,
+                        "onset_offset_s": onset_s - recording.started_monotonic_s,
+                        "broadcast_offset_s": broadcast_s - recording.started_monotonic_s,
+                    })

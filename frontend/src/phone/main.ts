@@ -67,7 +67,10 @@ async function openMic(): Promise<MediaStream> {
         warn("The browser is still filtering the microphone (echo cancel, noise or gain). Claps may be dulled. Try Chrome or Safari with a fresh tab.");
       }
       return stream;
-    } catch (e) { lastErr = e; }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "NotAllowedError") throw e;
+      lastErr = e;
+    }
   }
   throw lastErr;
 }
@@ -120,9 +123,12 @@ function connect() {
 }
 
 async function join() {
-  $<HTMLButtonElement>("join").disabled = true;
+  const button = $<HTMLButtonElement>("join");
+  button.disabled = true;
+  button.textContent = "Starting microphone…";
+  let stream: MediaStream | undefined;
   try {
-    const stream = await openMic();
+    stream = await openMic();
     ctx = new AudioContext(); // never force a rate: report the real one
     sampleRate = ctx.sampleRate;
     diag.sampleRate = sampleRate;
@@ -132,11 +138,6 @@ async function join() {
     src.connect(node);
     if (ctx.state !== "running") await ctx.resume();
     ctx.onstatechange = () => { if (ctx?.state === "running") pendingJump = true; };
-    document.addEventListener("visibilitychange", () => {
-      pendingJump = true;
-      if (!document.hidden) { void wake(); show({ tone: "warn", title: "Needs re-sync", detail: "The screen was off, so timing was lost. Wait for the next chirp." }); }
-    });
-
     node.port.onmessage = (ev) => {
       const { pcm, startSampleIndex, rms, clipping } = ev.data as { pcm: Int16Array; startSampleIndex: number; rms: number; clipping: boolean };
       const bar = $("vuBar");
@@ -155,14 +156,24 @@ async function join() {
       diag.framesSent++;
     };
 
-    joined = true;
+    show({ tone: "idle", title: "Connecting to the laptop", detail: "Microphone is on. Keep this page open." });
     connect();
-    await wake();
-    $("join").hidden = true;
+    joined = true;
+    document.addEventListener("visibilitychange", () => {
+      pendingJump = true;
+      if (!document.hidden) { void wake(); show({ tone: "warn", title: "Needs re-sync", detail: "The screen was off, so timing was lost. Wait for the next chirp." }); }
+    });
+    button.hidden = true;
     $("vuWrap").hidden = false;
-    show({ tone: "idle", title: "Joined", detail: "Microphone is on. Waiting for the laptop to sync the phones." });
+    void wake();
   } catch (e) {
-    $<HTMLButtonElement>("join").disabled = false;
+    stream?.getTracks().forEach((track) => track.stop());
+    node?.disconnect();
+    node = null;
+    if (ctx && ctx.state !== "closed") void ctx.close().catch(() => {});
+    ctx = null;
+    button.textContent = "Join";
+    button.disabled = false;
     show({ tone: "bad", title: "Couldn't start", detail: micError(e, window.isSecureContext) });
   }
 }

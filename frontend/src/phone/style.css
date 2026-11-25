@@ -32,3 +32,5 @@ header { padding:.7rem 1.1rem; } header small { text-transform:none; letter-spac
 main { padding:1rem 1.1rem; gap:.8rem; }
 button { min-height:3.2rem; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:#0d141c; font-size:1.1rem; font-weight:650; text-transform:none; letter-spacing:0; }
 .meter { height:.55rem; border-radius:3px; background:#252d37; } .meter > div { border-radius:3px; }
+body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+#notices:empty, #info:empty { display:none; }

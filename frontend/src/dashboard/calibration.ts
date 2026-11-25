@@ -45,12 +45,31 @@ function failReason(error: string | null): string {
   return /not detected/i.test(error) ? "Didn't hear the chirp" : error;
 }
 
-export function renderCalTable(table: HTMLElement, r: CalibrationResult) {
-  const rows = Object.entries(r.per_phone).map(([id, p]) => {
+export function renderCalTable(table: HTMLTableElement, r: CalibrationResult) {
+  table.replaceChildren();
+  const headings = table.createTHead().insertRow();
+  for (const title of ["Phone", "Timing", "Chirp", "Result"]) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.textContent = title;
+    headings.append(th);
+  }
+  const body = table.createTBody();
+  for (const [id, p] of Object.entries(r.per_phone)) {
     const g = grade(p.residual_ms, p.synced);
     const f = (v: number | null, d: number) => (v == null ? "–" : v.toFixed(d));
     const why = failReason(p.error);
-    return `<tr><td>${id}</td><td>${f(p.residual_ms, 2)} ms</td><td>${f(p.chirp_snr_db, 0)} dB</td><td class="${g.toLowerCase()}">${LABEL[g]}${why ? `<br><small>${why}</small>` : ""}</td></tr>`;
-  });
-  table.innerHTML = `<tr><th>Phone</th><th>Timing</th><th>Chirp</th><th>Result</th></tr>${rows.join("")}`;
+    const row = body.insertRow();
+    row.insertCell().textContent = id;
+    row.insertCell().textContent = `${f(p.residual_ms, 2)} ms`;
+    row.insertCell().textContent = `${f(p.chirp_snr_db, 0)} dB`;
+    const status = row.insertCell();
+    status.className = g.toLowerCase();
+    status.textContent = LABEL[g];
+    if (why) {
+      const reason = document.createElement("small");
+      reason.textContent = why;
+      status.append(document.createElement("br"), reason);
+    }
+  }
 }
