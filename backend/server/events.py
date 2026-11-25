@@ -167,8 +167,13 @@ def chirp_suppression(engine) -> dict[str, list[tuple[float, float]]]:
 
 
 def find_events_offline(slices: dict[str, PhoneAudioSlice], phones: dict[str, PhoneConfig], room: RoomConfig,
-                        *, engine=None, localizer=None, min_phones: int = 3) -> list[OfflineDetection]:
+                        *, engine=None, localizer=None, classifier=None, min_phones: int = 3
+                        ) -> list[OfflineDetection]:
     from backend.dsp.pipeline import LocalizationPipeline, OnsetDetector, SyncEngine
+    from backend.server.session import _discover
+    from backend.server.stubs import StubSoundClassifier
+
+    classifier = classifier or _discover("backend.classifier.model", "SoundClassifier", StubSoundClassifier)
 
     if engine is None:
         engine = SyncEngine()
@@ -204,6 +209,11 @@ def find_events_offline(slices: dict[str, PhoneAudioSlice], phones: dict[str, Ph
             result = None
             if len(aligned) >= min_phones:
                 result = localizer.localize(aligned, {p: phones[p] for p in aligned}, room, kind, fs=TARGET_FS)
+            if result is not None:
+                cls = classifier.classify_swarm(aligned, fs=TARGET_FS)
+                result = result.model_copy(update={
+                    "kind": kind, "sound_class": cls.sound_class, "is_drone": cls.is_drone,
+                    "class_confidence": cls.confidence, "class_probs": cls.probs})
             out.append(OfflineDetection(ev.t0, kind, dict(ev.onsets), result, aligned))
             if kind == "sustained":
                 seq = 1

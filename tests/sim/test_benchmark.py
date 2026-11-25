@@ -16,6 +16,7 @@ def test_benchmark_on_clean_judge_scenario():
     assert len(result.rows) == 10
     assert result.missed == 0
     assert result.mean_error_m < 0.3
+    assert [r.sound_class for r in result.rows] == [r.expected for r in result.rows]
     md = format_markdown(result)
     assert "| gt |" in md and "mean" in md and "inside_hull" in md
 
