@@ -19,7 +19,18 @@ class EventWindow:
 class AdaptiveEventTrigger:
     """Detects active sound events and crops direct-path or multi-frame windows."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        sustained_frame_s: float = 0.250,
+        sustained_max_frames: int = 3,
+        transient_pre_s: float = 0.015,
+        transient_post_s: float = 0.065,
+    ) -> None:
+        self.sustained_frame_s = sustained_frame_s
+        self.sustained_max_frames = sustained_max_frames
+        self.transient_pre_s = transient_pre_s
+        self.transient_post_s = transient_post_s
         self._noise_floor: dict[str, float] = {}
 
     def detect(
@@ -87,12 +98,12 @@ class AdaptiveEventTrigger:
         med_dur = float(np.median(active_durations_s))
 
         if med_crest >= 5.5 or med_dur <= 0.12:
-            # Transient (clap): crop tight 80 ms direct-path window [-15 ms, +65 ms] around earliest onset
+            # Transient (clap): crop tight direct-path window [-pre, +post] around earliest onset
             earliest_onset = min(onset_indices) if onset_indices else 0
-            start_i = max(0, earliest_onset - int(round(0.015 * fs)))
-            end_i = min(n_samples, earliest_onset + int(round(0.065 * fs)))
+            start_i = max(0, earliest_onset - int(round(self.transient_pre_s * fs)))
+            end_i = min(n_samples, earliest_onset + int(round(self.transient_post_s * fs)))
             if end_i - start_i < int(round(0.040 * fs)):
-                start_i = max(0, end_i - int(round(0.080 * fs)))
+                start_i = max(0, end_i - int(round((self.transient_pre_s + self.transient_post_s) * fs)))
             cropped = {pid: aligned_audio[pid][start_i:end_i] for pid in pids}
             return EventWindow(
                 kind="transient",
@@ -101,14 +112,14 @@ class AdaptiveEventTrigger:
                 peak_snr_db=best_snr_db,
             )
 
-        # Sustained (drone): slice up to 3 overlapping 250 ms Hann-windowed frames (50% hop)
-        frame_len = min(n_samples, int(round(0.250 * fs)))
+        # Sustained (drone): slice overlapping Hann-windowed frames (50% hop)
+        frame_len = min(n_samples, int(round(self.sustained_frame_s * fs)))
         step = max(1, frame_len // 2)
         hann = np.hanning(frame_len).astype(np.float32)
 
         frames: list[dict[str, np.ndarray]] = []
         pos = 0
-        while pos + frame_len <= n_samples and len(frames) < 3:
+        while pos + frame_len <= n_samples and len(frames) < self.sustained_max_frames:
             frames.append({pid: aligned_audio[pid][pos : pos + frame_len] * hann for pid in pids})
             pos += step
         if not frames:
