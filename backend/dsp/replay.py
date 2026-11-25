@@ -3,25 +3,30 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import numpy as np
 
-from shared.protocol import PhoneAudioSlice, PhoneConfig, RoomConfig
+from shared.protocol import CHIRP_DURATION_S, PhoneAudioSlice, PhoneConfig, RoomConfig
 from backend.dsp.clock import (
     AudioSliceV2,
     ChirpArrival,
+    EmissionRecord,
     HeldOutEvaluation,
     ReferenceClockFitter,
     evaluate_held_out_chirp,
+    flight_time_s,
     make_phone_slice,
     pair_arrivals_to_emissions,
 )
-from backend.dsp.sync import detect_all_chirps
+from backend.dsp.pipeline import LocalizationPipeline
+from backend.dsp.sync import SyncEngine, detect_all_chirps
+from backend.dsp.trigger import OnsetDetector
 
 
 class RecordingValidationError(ValueError):
@@ -38,6 +43,23 @@ class RecordedSession:
 
 
 @dataclass(slots=True)
+class ReplayEvent:
+    """Single post-chirp sound event localized during offline replay."""
+
+    event_id: str
+    timestamp_s: float
+    x_m: float
+    y_m: float
+    uncertainty_m: float
+    residual_ms: float
+    confidence: float
+    runtime_ms: float
+    phones_used: list[str]
+    inlier_pairs: int
+    total_pairs: int
+
+
+@dataclass(slots=True)
 class ReplayReport:
     path: str
     phones_loaded: list[str]
@@ -48,6 +70,7 @@ class ReplayReport:
     full_fit_ref_phone_id: str | None
     full_fit_residuals_ms: dict[str, float]
     full_fit_drift_ppm: dict[str, float]
+    events: list[ReplayEvent] = field(default_factory=list)
 
 
 def _extract_scalar_int(arr: np.ndarray, key: str) -> int:
@@ -224,10 +247,160 @@ def load_recording_npz(path: str | Path) -> RecordedSession:
     return RecordedSession(path=p, meta=meta, room=room, phones=phones, slices=slices)
 
 
+def replay_localize_events(
+    session: RecordedSession,
+    fitter: ReferenceClockFitter,
+    emissions: list[EmissionRecord],
+    target_fs: int = 48000,
+    cooldown_s: float = 0.40,
+) -> list[ReplayEvent]:
+    """Run OnsetDetector + SyncEngine + LocalizationPipeline over post-chirp audio in a recording."""
+    if len(fitter.models) < 2:
+        return []
+
+    engine = SyncEngine()
+    engine.load_fitter(fitter)
+    pipeline = LocalizationPipeline()
+
+    chirp_windows: list[tuple[float, float]] = []
+    for em in emissions:
+        emit_ts: list[float] = []
+        for pid, obs in em.obs_by_phone.items():
+            if pid not in session.phones:
+                continue
+            t_glob = engine.to_global(pid, obs.sample_index)
+            if t_glob is not None:
+                emit_ts.append(t_glob - flight_time_s(session.phones[pid], session.room))
+        if emit_ts:
+            t_emit = float(np.median(emit_ts))
+            chirp_windows.append((t_emit - 0.15, t_emit + CHIRP_DURATION_S + 0.35))
+
+    def _in_chirp(t_s: float) -> bool:
+        return any(lo <= t_s <= hi for lo, hi in chirp_windows)
+
+    raw_onsets: list[tuple[float, str]] = []
+    sync_ends: list[float] = []
+    for pid, slc in session.slices.items():
+        if not engine.is_synced(pid) or pid not in session.phones:
+            continue
+        if len(slc.samples_f32) >= 4:
+            t_end = engine.to_global(pid, slc.start_sample_index + len(slc.samples_f32) - 2)
+            if t_end is not None:
+                sync_ends.append(t_end)
+        det = OnsetDetector(refractory_s=cooldown_s)
+        idx_hits = det.push(
+            slc.samples_f32,
+            start_sample_index=slc.start_sample_index,
+            fs=slc.sample_rate,
+            valid_mask=getattr(slc, "valid_mask", None),
+        )
+        for idx in idx_hits:
+            t_on = engine.to_global(pid, idx)
+            if t_on is None or _in_chirp(t_on):
+                continue
+            raw_onsets.append((t_on, pid))
+
+    if not raw_onsets:
+        return []
+
+    raw_onsets.sort(key=lambda item: item[0])
+    cluster_window_s = 0.06
+    clusters: list[list[tuple[float, str]]] = []
+    cur_cluster: list[tuple[float, str]] = [raw_onsets[0]]
+    group_start = raw_onsets[0][0]
+    for item in raw_onsets[1:]:
+        if item[0] - group_start <= cluster_window_s:
+            cur_cluster.append(item)
+        else:
+            clusters.append(cur_cluster)
+            cur_cluster = [item]
+            group_start = item[0]
+    clusters.append(cur_cluster)
+
+    max_global_end = float(np.median(sync_ends)) if sync_ends else None
+    events: list[ReplayEvent] = []
+    last_event_t = -float("inf")
+
+    for cluster in clusters:
+        distinct_phones = {pid for _, pid in cluster}
+        if len(distinct_phones) < 2:
+            continue
+        t_event = min(t for t, _ in cluster)
+        if t_event - last_event_t < cooldown_s:
+            continue
+
+        win_start = t_event - 0.02
+        next_chirp_lo = min((lo for lo, _ in chirp_windows if lo > t_event), default=None)
+        win_hi = next_chirp_lo - 0.01 if next_chirp_lo is not None else float("inf")
+        if max_global_end is not None:
+            win_hi = min(win_hi, max_global_end)
+        if win_hi < t_event + 0.08:
+            continue
+
+        aligned_short = engine.extract_aligned_window(
+            session.slices,
+            win_start,
+            min(win_hi, t_event + 0.12),
+            target_fs=target_fs,
+        )
+        long_end = min(win_hi, t_event + 0.65)
+        if long_end > min(win_hi, t_event + 0.12) + 0.05:
+            aligned_long = engine.extract_aligned_window(
+                session.slices,
+                win_start,
+                long_end,
+                target_fs=target_fs,
+            )
+            aligned = (
+                aligned_long
+                if len(aligned_long) >= len(aligned_short) and len(aligned_long) >= 2
+                else aligned_short
+            )
+        else:
+            aligned = aligned_short
+
+        if len(aligned) < 2:
+            continue
+
+        t0 = time.perf_counter()
+        res = pipeline.detect_and_localize(
+            aligned,
+            session.phones,
+            session.room,
+            fs=target_fs,
+            timestamp_s=t_event,
+        )
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        if res is None:
+            continue
+
+        last_event_t = t_event
+        events.append(
+            ReplayEvent(
+                event_id=res.event_id,
+                timestamp_s=round(t_event, 4),
+                x_m=res.x_m,
+                y_m=res.y_m,
+                uncertainty_m=res.uncertainty_m,
+                residual_ms=res.residual_ms,
+                confidence=res.confidence,
+                runtime_ms=round(dt_ms, 2),
+                phones_used=list(res.phones_used),
+                inlier_pairs=sum(1 for p in res.pair_tdoas_ms if p.inlier),
+                total_pairs=len(res.pair_tdoas_ms),
+            )
+        )
+
+    return events
+
+
 def replay_recording(
     path: str | Path,
     fit_chirps: int = 2,
     held_out_index: int = 2,
+    localize: bool = False,
+    target_fs: int = 48000,
+    cooldown_s: float = 0.40,
 ) -> ReplayReport:
     """Replay a saved v2 .npz recording: detect chirps, evaluate held-out sync, and run full fit."""
     session = load_recording_npz(path)
@@ -268,6 +441,17 @@ def replay_recording(
     full_fitter.ingest_emissions(emissions, sample_rates=sample_rates)
     full_fit_residuals = {pid: round(m.residual_ms, 4) for pid, m in full_fitter.models.items()}
     full_fit_drift = {pid: round(m.drift_ppm, 3) for pid, m in full_fitter.models.items()}
+    events = (
+        replay_localize_events(
+            session,
+            full_fitter,
+            emissions,
+            target_fs=target_fs,
+            cooldown_s=cooldown_s,
+        )
+        if localize
+        else []
+    )
 
     return ReplayReport(
         path=str(session.path),
@@ -279,6 +463,7 @@ def replay_recording(
         full_fit_ref_phone_id=full_fitter.ref_phone_id,
         full_fit_residuals_ms=full_fit_residuals,
         full_fit_drift_ppm=full_fit_drift,
+        events=events,
     )
 
 
@@ -310,6 +495,19 @@ def _format_report(report: ReplayReport) -> str:
         "Full multi-chirp fit drift (ppm): "
         + (", ".join(f"{pid}={ppm:+.2f} ppm" for pid, ppm in sorted(report.full_fit_drift_ppm.items())) or "none"),
     ]
+    if report.events:
+        runtimes = [ev.runtime_ms for ev in report.events]
+        lines.append(
+            f"Localized post-chirp events ({len(report.events)}): "
+            f"mean_runtime={np.mean(runtimes):.2f} ms, max_runtime={np.max(runtimes):.2f} ms"
+        )
+        for ev in report.events:
+            lines.append(
+                f"  {ev.event_id} t={ev.timestamp_s:.3f}s -> ({ev.x_m:.2f}, {ev.y_m:.2f}) m "
+                f"| res={ev.residual_ms:.3f} ms | unc={ev.uncertainty_m:.2f} m "
+                f"| pairs={ev.inlier_pairs}/{ev.total_pairs} | phones={len(ev.phones_used)} "
+                f"| runtime={ev.runtime_ms:.2f} ms"
+            )
     return "\n".join(lines)
 
 
@@ -318,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("recording", help="Path to v2 .npz recording")
     parser.add_argument("--fit-chirps", type=int, default=2, help="Number of initial chirps used for clock fit")
     parser.add_argument("--held-out-index", type=int, default=2, help="0-based chirp index scored before fitting")
+    parser.add_argument("--localize", action="store_true", help="Run 2D localization replay on post-chirp audio")
     parser.add_argument("--json", action="store_true", help="Print JSON output")
     args = parser.parse_args(argv)
 
@@ -326,6 +525,7 @@ def main(argv: list[str] | None = None) -> int:
             args.recording,
             fit_chirps=args.fit_chirps,
             held_out_index=args.held_out_index,
+            localize=args.localize,
         )
     except RecordingValidationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

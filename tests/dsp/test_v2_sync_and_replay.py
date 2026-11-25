@@ -391,3 +391,247 @@ def test_gap_aware_extraction_onset_detector_and_v2_localize() -> None:
     res_d = loc.localize(aligned_drone, phones, room, kind="sustained", fs=fs)
     assert res_d is not None
     assert math.hypot(res_d.x_m - src_d[0], res_d.y_m - src_d[1]) < 0.15
+
+
+def test_gap_mask_valid_only_noise_floor_and_adjacent_corrupted_chirp() -> None:
+    from backend.dsp.sync import detect_all_chirps, detect_chirp_arrivals
+
+    fs = 48000
+    rng = np.random.default_rng(11)
+    noise = rng.normal(0.0, 0.02, size=10 * fs).astype(np.float32)
+    mask_heavy_gap = np.ones(len(noise), dtype=bool)
+    mask_heavy_gap[: int(6.5 * fs)] = False
+    noise[~mask_heavy_gap] = 0.0
+
+    assert detect_all_chirps(noise, fs=fs, valid_mask=mask_heavy_gap) == []
+    arr_single, _ = detect_chirp_arrivals(noise, fs=fs, mode="lfm_single", valid_mask=mask_heavy_gap)
+    assert arr_single == []
+
+    with pytest.raises(ValueError, match="valid_mask"):
+        detect_all_chirps(noise, fs=fs, valid_mask=np.ones(100, dtype=bool))
+    with pytest.raises(ValueError, match="valid_mask"):
+        detect_chirp_arrivals(noise, fs=fs, valid_mask=np.ones(100, dtype=bool))
+
+    # Gapped loud chirp at 2.0 s must NOT blank a clean chirp 0.5 s later at 2.5 s
+    chirp = generate_lfm_chirp(fs)
+    buf = rng.normal(0.0, 0.005, size=6 * fs).astype(np.float32)
+    i_bad = int(2.0 * fs)
+    i_clean = int(2.5 * fs)
+    buf[i_bad : i_bad + len(chirp)] += 3.0 * chirp
+    buf[i_clean : i_clean + len(chirp)] += chirp
+
+    vm = np.ones(len(buf), dtype=bool)
+    vm[i_bad + int(0.04 * fs) : i_bad + int(0.09 * fs)] = False
+    buf[~vm] = 0.0
+
+    hits = detect_all_chirps(buf, fs=fs, valid_mask=vm)
+    assert len(hits) == 1
+    err_ms = abs(hits[0].local_offset - i_clean) / fs * 1000.0
+    assert err_ms < 0.5
+
+
+def test_clipped_phone_exclusion_and_three_phone_fallback() -> None:
+    room = RoomConfig(width_m=8.0, height_m=6.0, temperature_c=20.0, speaker_x_m=4.0, speaker_y_m=0.5)
+    c = speed_of_sound(room.temperature_c)
+    fs = 48000
+    coords = [("p1", 0.5, 0.5), ("p2", 7.5, 0.5), ("p3", 7.5, 5.5), ("p4", 0.5, 5.5)]
+    phones = {pid: PhoneConfig(phone_id=pid, label=pid, x_m=x, y_m=y, sample_rate=fs) for pid, x, y in coords}
+
+    # 1) Transient clap where p2 clips strongly and is phase-shifted by +25 ms
+    src_clap = (2.4, 3.8)
+    rng = np.random.default_rng(77)
+    n_clap = int(0.45 * fs)
+    t_b = np.arange(int(0.025 * fs)) / fs
+    raw_b = np.exp(-t_b / 0.0045) * rng.normal(0.0, 1.0, size=len(t_b))
+    burst = (0.6 * raw_b / (np.max(np.abs(raw_b)) + 1e-12)).astype(np.float32)
+    raw_clap = np.zeros(n_clap, dtype=np.float32)
+    raw_clap[int(0.15 * fs) : int(0.15 * fs) + len(burst)] = burst
+
+    idx_c = np.arange(n_clap, dtype=np.float64)
+    aligned_clap: dict[str, np.ndarray] = {}
+    for pid, p in phones.items():
+        tau = math.hypot(src_clap[0] - p.x_m, src_clap[1] - p.y_m) / c
+        sig = map_coordinates(raw_clap.astype(np.float64), [idx_c - tau * fs], order=3, mode="constant", cval=0.0)
+        sig += rng.normal(0.0, 1e-4, size=n_clap)
+        if pid == "p2":
+            sig_bad = map_coordinates(raw_clap.astype(np.float64), [idx_c - (tau + 0.025) * fs], order=3, mode="constant", cval=0.0)
+            sig = np.clip(sig_bad * 12.0, -1.0, 1.0)
+        aligned_clap[pid] = sig.astype(np.float32)
+
+    loc = LocalizationPipeline()
+    res_v2 = loc.localize(aligned_clap, phones, room, kind="transient", fs=fs)
+    assert res_v2 is not None
+    assert set(res_v2.phones_used) == {"p1", "p3", "p4"}
+    assert math.hypot(res_v2.x_m - src_clap[0], res_v2.y_m - src_clap[1]) < 0.15
+
+    res_v1 = loc.detect_and_localize(aligned_clap, phones, room, fs=fs)
+    assert res_v1 is not None
+    assert set(res_v1.phones_used) == {"p1", "p3", "p4"}
+    assert math.hypot(res_v1.x_m - src_clap[0], res_v1.y_m - src_clap[1]) < 0.15
+
+    # 3-phone fallback: dropping p2 would leave only 2 phones, so p2 is retained safely
+    three_phones = {k: phones[k] for k in ("p1", "p2", "p3")}
+    three_aligned = {k: aligned_clap[k] for k in ("p1", "p2", "p3")}
+    res_3 = loc.localize(three_aligned, three_phones, room, kind="transient", fs=fs)
+    assert res_3 is not None
+    assert len(res_3.phones_used) == 3
+
+    # 2) Sustained drone where p3 clips only near window edge (must check BEFORE Hann tapering)
+    src_drone = (5.4, 2.2)
+    n_drone = int(0.75 * fs)
+    t_d = np.arange(n_drone, dtype=np.float64) / fs
+    drone_sig = sum((0.2 / k) * np.sin(2.0 * np.pi * 150.0 * k * t_d) for k in range(1, 9)).astype(np.float32)
+    idx_d = np.arange(n_drone, dtype=np.float64)
+    aligned_drone: dict[str, np.ndarray] = {}
+    for pid, p in phones.items():
+        tau = math.hypot(src_drone[0] - p.x_m, src_drone[1] - p.y_m) / c
+        shift = tau + (0.025 if pid == "p3" else 0.0)
+        sig = map_coordinates(drone_sig.astype(np.float64), [idx_d - shift * fs], order=3, mode="constant", cval=0.0)
+        if pid == "p3":
+            # Clip at the very start/end of the 250 ms edge where a Hann window alone would mask it
+            sig[: int(0.015 * fs)] = 1.0
+            sig[-int(0.015 * fs) :] = -1.0
+        aligned_drone[pid] = sig.astype(np.float32)
+
+    res_dr_v2 = loc.localize(aligned_drone, phones, room, kind="sustained", fs=fs)
+    assert res_dr_v2 is not None
+    assert set(res_dr_v2.phones_used) == {"p1", "p2", "p4"}
+    assert math.hypot(res_dr_v2.x_m - src_drone[0], res_dr_v2.y_m - src_drone[1]) < 0.20
+
+    res_dr_v1 = loc.detect_and_localize(aligned_drone, phones, room, fs=fs)
+    assert res_dr_v1 is not None
+    assert set(res_dr_v1.phones_used) == {"p1", "p2", "p4"}
+    assert math.hypot(res_dr_v1.x_m - src_drone[0], res_dr_v1.y_m - src_drone[1]) < 0.20
+
+    # 3) SyncEngine.extract_aligned_window(..., exclude_clipped=True) excludes p2 while keeping sync
+    chirp = generate_lfm_chirp(fs)
+    sync_slices = {}
+    for pid, p in phones.items():
+        tau_spk = math.hypot(p.x_m - room.speaker_x_m, p.y_m - room.speaker_y_m) / c
+        buf = rng.normal(0.0, 1e-4, size=int(2.0 * fs)).astype(np.float32)
+        i_c = int(round((0.30 + tau_spk) * fs))
+        buf[i_c : i_c + len(chirp)] += chirp
+        ev_s = int(round(1.10 * fs))
+        buf[ev_s : ev_s + len(aligned_clap[pid])] += aligned_clap[pid]
+        sync_slices[pid] = make_phone_slice(pid, buf, start_sample_index=1000, sample_rate=fs)
+
+    eng = SyncEngine()
+    cal = eng.add_chirp_observation(sync_slices, phones, room, mode="lfm_single")
+    assert cal.success is True
+    t_clap_g = eng.to_global("p1", 1000 + int(round(1.25 * fs)))
+    assert t_clap_g is not None
+    ext = eng.extract_aligned_window(sync_slices, t_clap_g - 0.05, t_clap_g + 0.08, target_fs=fs, exclude_clipped=True)
+    assert set(ext.keys()) == {"p1", "p3", "p4"}
+    assert eng.is_synced("p2") is True
+
+
+def test_replay_offline_localize_end_to_end(tmp_path: Path) -> None:
+    room = RoomConfig(width_m=8.0, height_m=6.0, temperature_c=20.0, speaker_x_m=4.0, speaker_y_m=0.5)
+    c = speed_of_sound(room.temperature_c)
+    fs_sim = 48000
+    chirp = generate_lfm_chirp(fs_sim) * np.float32(0.25)
+    chirp_times = [0.8, 16.0, 31.0]
+    total_s = 33.5
+    clap_xy = (3.2, 2.4)
+    drone_xy = (5.4, 3.9)
+
+    rng = np.random.default_rng(2027)
+    t_b = np.arange(int(0.025 * fs_sim)) / fs_sim
+    raw_b = np.exp(-t_b / 0.0045) * rng.normal(0.0, 1.0, size=len(t_b))
+    clap_burst = (0.85 * raw_b / (np.max(np.abs(raw_b)) + 1e-12)).astype(np.float32)
+    t_d = np.arange(int(0.70 * fs_sim), dtype=np.float64) / fs_sim
+    drone_burst = sum((0.25 / k) * np.sin(2.0 * np.pi * 150.0 * k * t_d) for k in range(1, 9)).astype(np.float32)
+
+    specs = [
+        ("iphone", 0.5, 0.5, 44100, -0.180, +36.0),
+        ("android_a", 7.5, 0.5, 48000, +0.125, -28.0),
+        ("android_b", 7.5, 5.5, 48000, +0.240, +21.0),
+        ("android_c", 0.5, 5.5, 44100, -0.095, -42.0),
+    ]
+    phones: dict[str, PhoneConfig] = {}
+    arrays: dict[str, np.ndarray] = {}
+    chirp_noise_std = float(np.std(chirp)) / (10.0 ** (15.0 / 20.0))
+
+    for idx, (pid, x, y, fs_phone, offset_s, drift_ppm) in enumerate(specs):
+        phones[pid] = PhoneConfig(phone_id=pid, label=pid, x_m=x, y_m=y, sample_rate=fs_phone)
+        tau_spk = math.hypot(x - room.speaker_x_m, y - room.speaker_y_m) / c
+        g_sig = np.zeros(int((total_s + 2.0) * fs_sim), dtype=np.float32)
+
+        for t_em in chirp_times:
+            t_arr = t_em + tau_spk
+            for amp, dt in ((1.0, 0.0), (0.65, 0.007)):
+                pos = (t_arr + dt) * fs_sim
+                i0 = int(math.floor(pos))
+                idx_c = np.arange(len(chirp), dtype=np.float64) - (pos - i0)
+                shifted = map_coordinates(chirp.astype(np.float64), [idx_c], order=3, mode="constant", cval=0.0)
+                g_sig[i0 : i0 + len(chirp)] += (amp * shifted).astype(np.float32)
+
+        # Clap at t=8.0 s + sustained drone burst at t=23.0 s
+        for src_xy, t_ev, sig_ev in ((clap_xy, 8.0, clap_burst), (drone_xy, 23.0, drone_burst)):
+            tau_ev = math.hypot(x - src_xy[0], y - src_xy[1]) / c
+            pos = (t_ev + tau_ev) * fs_sim
+            i0 = int(math.floor(pos))
+            idx_e = np.arange(len(sig_ev), dtype=np.float64) - (pos - i0)
+            shifted = map_coordinates(sig_ev.astype(np.float64), [idx_e], order=3, mode="constant", cval=0.0)
+            g_sig[i0 : i0 + len(sig_ev)] += shifted.astype(np.float32)
+
+        rec = _sim_recording(g_sig, fs_phone, offset_s=offset_s, drift_ppm=drift_ppm, total_s=total_s)
+        rec += rng.normal(0.0, chirp_noise_std, size=len(rec)).astype(np.float32)
+
+        valid = np.ones(len(rec), dtype=bool)
+        if pid == "android_a":
+            # Packet drop 250 ms after the clap: short window still covers the clap with all 4 phones!
+            g0 = int((8.25 - offset_s) * fs_phone)
+            g1 = int((8.28 - offset_s) * fs_phone)
+            valid[g0:g1] = False
+            rec[g0:g1] = 0.0
+
+        arrays[f"{pid}_pcm"] = rec
+        arrays[f"{pid}_start_index"] = np.int64(8_000 + idx * 4_000)
+        arrays[f"{pid}_fs"] = np.int32(fs_phone)
+        arrays[f"{pid}_valid"] = valid
+
+    meta = {
+        "room": {
+            "width_m": room.width_m,
+            "height_m": room.height_m,
+            "temperature_c": room.temperature_c,
+            "speaker_x_m": room.speaker_x_m,
+            "speaker_y_m": room.speaker_y_m,
+        },
+        "phones": {pid: {"x_m": p.x_m, "y_m": p.y_m, "label": p.label} for pid, p in phones.items()},
+    }
+    arrays["meta"] = np.array(json.dumps(meta))
+    npz_path = tmp_path / "replay_events.npz"
+    np.savez(npz_path, **arrays)
+
+    report = replay_recording(npz_path, localize=True)
+    assert report.held_out.gate_passed is True
+    assert report.held_out.worst_pairwise_ms is not None and report.held_out.worst_pairwise_ms < 0.25
+    assert len(report.events) == 2
+
+    ev1, ev2 = report.events
+    err1 = math.hypot(ev1.x_m - clap_xy[0], ev1.y_m - clap_xy[1])
+    err2 = math.hypot(ev2.x_m - drone_xy[0], ev2.y_m - drone_xy[1])
+    print(f"\nOffline --localize replay: clap err={err1:.3f} m ({ev1.runtime_ms:.1f} ms), drone err={err2:.3f} m ({ev2.runtime_ms:.1f} ms)")
+    assert set(ev1.phones_used) == {"iphone", "android_a", "android_b", "android_c"}
+    assert err1 < 0.20
+    assert err2 < 0.25
+
+    proc_loc = subprocess.run(
+        [sys.executable, "-m", "backend.dsp.replay", str(npz_path), "--localize", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_loc = json.loads(proc_loc.stdout)
+    assert len(data_loc["events"]) == 2
+
+    proc_default = subprocess.run(
+        [sys.executable, "-m", "backend.dsp.replay", str(npz_path), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data_default = json.loads(proc_default.stdout)
+    assert data_default["events"] == []

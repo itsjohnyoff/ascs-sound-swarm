@@ -59,12 +59,32 @@ def _local_template_ncc(
     return float(env[idx]) / local_norm
 
 
+def _valid_envelope_mask(
+    valid_mask: np.ndarray | None,
+    n_samples: int,
+    tpl_len: int,
+) -> np.ndarray | None:
+    """Return boolean mask over matched-filter envelope indices where the full template is valid."""
+    if valid_mask is None:
+        return None
+    vm = np.asarray(valid_mask, dtype=bool)
+    if len(vm) != n_samples:
+        raise ValueError(f"valid_mask length ({len(vm)}) != samples length ({n_samples})")
+    if bool(vm.all()):
+        return None
+    invalid_prefix = np.concatenate(([0], np.cumsum(~vm)))
+    return invalid_prefix[tpl_len:] == invalid_prefix[:-tpl_len]
+
+
 def _compute_chirp_envelope(
     samples_f32: np.ndarray,
     fs: int,
     template: np.ndarray | None = None,
+    valid_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, int] | None:
     """Bandpass filter audio and compute matched-filter Hilbert envelope."""
+    if valid_mask is not None and len(valid_mask) != len(samples_f32):
+        raise ValueError(f"valid_mask length ({len(valid_mask)}) != samples length ({len(samples_f32)})")
     tpl = (generate_lfm_chirp(fs=fs) if template is None else np.asarray(template)).astype(np.float64)
     if len(samples_f32) < len(tpl) + 16:
         return None
@@ -81,7 +101,18 @@ def _compute_chirp_envelope(
     corr = fftconvolve(x_filt, tpl[::-1], mode="valid")
     n_fast = next_fast_len(len(corr))
     env = np.abs(hilbert(corr, N=n_fast)[: len(corr)])
-    sigma = float(np.median(env)) / 1.17741 + 1e-12
+
+    env_valid = _valid_envelope_mask(valid_mask, len(samples_f32), len(tpl))
+    if env_valid is not None:
+        if not bool(np.any(env_valid)):
+            return None
+        # Estimate Rayleigh noise floor strictly over valid envelope samples so large zero-filled
+        # packet gaps cannot collapse sigma toward zero and trigger false chirp detections.
+        sigma = float(np.median(env[env_valid])) / 1.17741 + 1e-12
+        env = np.where(env_valid, env, 0.0)
+    else:
+        sigma = float(np.median(env)) / 1.17741 + 1e-12
+
     return env, x_filt, tpl, sigma, len(tpl)
 
 
@@ -152,6 +183,21 @@ def _pick_first_arrival(
     return idx, snr_db
 
 
+CLIP_THRESHOLD: float = 0.99
+MIN_CLIPPED_SAMPLES: int = 2
+
+
+def is_window_clipped(
+    samples: np.ndarray,
+    clip_threshold: float = CLIP_THRESHOLD,
+    min_clipped_samples: int = MIN_CLIPPED_SAMPLES,
+) -> bool:
+    """Return True when at least min_clipped_samples reach clip_threshold."""
+    if len(samples) == 0:
+        return False
+    return int(np.count_nonzero(np.abs(samples) >= clip_threshold)) >= min_clipped_samples
+
+
 def detect_all_chirps(
     samples_f32: np.ndarray,
     fs: int,
@@ -163,10 +209,12 @@ def detect_all_chirps(
     min_ncc: float = 0.25,
 ) -> list[ChirpArrival]:
     """Detect all LFM chirps in a recording or buffer slice, returning chronological Arrivals."""
-    if valid_mask is not None and len(valid_mask) != len(samples_f32):
-        raise ValueError(f"valid_mask length ({len(valid_mask)}) != samples length ({len(samples_f32)})")
-
-    prep = _compute_chirp_envelope(samples_f32, fs=fs, template=template)
+    prep = _compute_chirp_envelope(
+        samples_f32,
+        fs=fs,
+        template=template,
+        valid_mask=valid_mask,
+    )
     if prep is None:
         return []
     env, x_filt, _, sigma, tpl_len = prep
@@ -195,13 +243,6 @@ def detect_all_chirps(
         mask_hi = min(len(working_env), i_center + guard + 1)
         working_env[mask_lo:mask_hi] = 0.0
 
-        # Reject chirp candidates overlapping lost/gap samples
-        if valid_mask is not None:
-            v_lo = max(0, int(math.floor(idx_rel)))
-            v_hi = min(len(valid_mask), int(math.ceil(idx_rel)) + tpl_len)
-            if not bool(np.all(valid_mask[v_lo:v_hi])):
-                continue
-
         arrivals.append(
             ChirpArrival(
                 sample_index=float(start_sample_index) + idx_rel,
@@ -225,13 +266,10 @@ def detect_chirp_arrivals(
     valid_mask: np.ndarray | None = None,
 ) -> tuple[list[float], float]:
     """Detect fractional chirp start sample indices inside samples_f32."""
-    prep = _compute_chirp_envelope(samples_f32, fs=fs)
+    prep = _compute_chirp_envelope(samples_f32, fs=fs, valid_mask=valid_mask)
     if prep is None:
         return [], -100.0
     env, x_filt, _, sigma, tpl_len = prep
-    if valid_mask is not None and not valid_mask.all():
-        invalid_prefix = np.concatenate(([0], np.cumsum(~valid_mask)))
-        env = np.where(invalid_prefix[tpl_len:] == invalid_prefix[:-tpl_len], env, 0.0)
 
     p_a, snr_a = _pick_first_arrival(env, x_filt, tpl_len, fs, 0, len(env), sigma, min_snr_db, min_ncc)
     if p_a is None:
@@ -322,6 +360,11 @@ class SyncEngine:
             return (float(t_global) - model.a_s) / model.b_s
         return None
 
+    def load_fitter(self, fitter: ReferenceClockFitter) -> None:
+        """Install an existing fitted ReferenceClockFitter (e.g. from offline replay)."""
+        self._v2_fitter = fitter
+        self._models.clear()
+
     def remove_phone(self, phone_id: str) -> None:
         """Remove a disconnected phone and re-reference if it was the global clock reference."""
         self._models.pop(phone_id, None)
@@ -357,10 +400,14 @@ class SyncEngine:
 
             valid_mask = getattr(slc, "valid_mask", None)
             if requires_dual:
-                rel_arrivals, snr_db = detect_chirp_arrivals(slc.samples_f32, fs=slc.sample_rate, mode=mode)
+                rel_arrivals, snr_db = detect_chirp_arrivals(
+                    slc.samples_f32, fs=slc.sample_rate, mode=mode, valid_mask=valid_mask,
+                )
                 arrivals = []
                 if rel_arrivals:
-                    prep = _compute_chirp_envelope(slc.samples_f32, fs=slc.sample_rate)
+                    prep = _compute_chirp_envelope(
+                        slc.samples_f32, fs=slc.sample_rate, valid_mask=valid_mask,
+                    )
                     if prep is not None:
                         env, x_filt, _, _, tpl_len = prep
                         for idx_rel in rel_arrivals:
@@ -558,11 +605,14 @@ class SyncEngine:
         t_start_s: float,
         t_end_s: float,
         target_fs: int = 48000,
+        exclude_clipped: bool = False,
+        clip_threshold: float = CLIP_THRESHOLD,
     ) -> dict[str, np.ndarray]:
         """Resample all eligible synced phones onto a common uniform global timeline at target_fs.
 
-        Gap-aware: excludes any phone whose captured samples do not cover [t_start_s, t_end_s]
-        or whose valid_mask contains False anywhere inside the window, while preserving its clock model.
+        Gap-aware: excludes any phone whose captured samples do not cover [t_start_s, t_end_s],
+        whose valid_mask contains False anywhere inside the window, or (when exclude_clipped=True)
+        whose raw samples clip inside the window, while preserving its clock model.
         """
         if t_end_s <= t_start_s:
             return {}
@@ -587,14 +637,17 @@ class SyncEngine:
             if lo_rel < 0.0 or hi_rel > float(n_samples - 1) or hi_rel <= lo_rel:
                 continue
 
+            i_lo = max(0, int(math.floor(lo_rel)))
+            i_hi = min(n_samples - 1, int(math.ceil(hi_rel)))
             valid_mask = getattr(slc, "valid_mask", None)
             if valid_mask is not None:
                 if len(valid_mask) != n_samples:
                     continue
-                i_lo = max(0, int(math.floor(lo_rel)))
-                i_hi = min(n_samples - 1, int(math.ceil(hi_rel)))
                 if not bool(np.all(valid_mask[i_lo : i_hi + 1])):
                     continue
+
+            if exclude_clipped and is_window_clipped(slc.samples_f32[i_lo : i_hi + 1], clip_threshold=clip_threshold):
+                continue
 
             n_local = np.linspace(lo_rel, hi_rel, n_out, dtype=np.float64)
             aligned[pid] = map_coordinates(
