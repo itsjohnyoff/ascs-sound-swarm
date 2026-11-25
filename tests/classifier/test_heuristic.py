@@ -35,7 +35,7 @@ def _window(src, kind):
 @pytest.mark.parametrize("seed", range(10))
 def test_clap_drone_speech_on_raw_sources(seed):
     rng = np.random.default_rng(seed)
-    clf = SoundClassifier()
+    clf = SoundClassifier(model_path=None)
     assert clf.backend_name == "heuristic"
     assert clf.classify_swarm(_swarm(_window(clap(rng), "transient"), rng)).sound_class == "clap"
     res = clf.classify_swarm(_swarm(_window(drone(rng), "sustained"), rng))
@@ -44,7 +44,7 @@ def test_clap_drone_speech_on_raw_sources(seed):
 
 
 def test_accuracy_and_speed_on_judge_scenarios():
-    clf = SoundClassifier()
+    clf = SoundClassifier(model_path=None)
     correct = total = 0
     times = []
     for seed in range(3):

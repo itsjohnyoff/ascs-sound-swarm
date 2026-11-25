@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, fields
 
 import numpy as np
 
 F0_MIN, F0_MAX, N_HARMONICS = 70.0, 350.0, 8
+BANDS_HZ = ((0.0, 300.0), (300.0, 2000.0), (2000.0, 24000.0))
 
 
 @dataclass
@@ -20,6 +21,15 @@ class Features:
     flatness: float        # spectral flatness 0 (tonal) .. 1 (noise)
     centroid_hz: float
     concentration: float   # share of energy in the loudest 40 ms (impulsive sounds ~1)
+    low_ratio: float = 0.0   # energy share below 300 Hz
+    mid_ratio: float = 0.0   # 300 Hz - 2 kHz
+    high_ratio: float = 0.0  # above 2 kHz
+    duration_s: float = 0.0  # window length (the server picks 80 ms for transients, 750 ms for sustained)
+
+
+FEATURE_NAMES: tuple[str, ...] = tuple(f.name for f in fields(Features))
+# rms is a level, not a timbre: the trained model must not learn "loud = drone".
+MODEL_FEATURES: tuple[str, ...] = tuple(n for n in FEATURE_NAMES if n != "rms")
 
 
 def _comb(x: np.ndarray, fs: int) -> tuple[float, float]:
@@ -60,4 +70,13 @@ def extract(x: np.ndarray, fs: int) -> Features:
     freqs = np.fft.rfftfreq(len(x), 1 / fs)
     flat = float(np.exp(np.mean(np.log(mag))) / np.mean(mag))
     centroid = float(np.sum(freqs * mag) / np.sum(mag))
-    return Features(rms, float(np.max(np.abs(x)) / rms), active, comb, f0, stability, flat, centroid, conc)
+    power = mag ** 2
+    total = float(power.sum())
+    bands = [float(power[(freqs >= lo) & (freqs < hi)].sum()) / total for lo, hi in BANDS_HZ]
+    return Features(rms, float(np.max(np.abs(x)) / rms), active, comb, f0, stability, flat, centroid, conc,
+                    *bands, len(x) / fs)
+
+
+def vector(f: Features, names: tuple[str, ...] = MODEL_FEATURES) -> np.ndarray:
+    d = dict(zip(FEATURE_NAMES, astuple(f)))
+    return np.array([d[n] for n in names], dtype=np.float64)
