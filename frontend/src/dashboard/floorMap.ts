@@ -9,9 +9,9 @@ export interface MapModel {
 }
 type DragTarget = { kind: "phone"; id: string } | { kind: "speaker" } | null;
 
-const INK = "#e8eef5", MUTE = "#8b949e", GRID = "#1c232c", EDGE = "#6e7d8c";
-const GRADE_COLOR = { pass: "#3fb950", warn: "#d29922", fail: "#f85149" } as const;
-const CLASS_RGB: Record<string, string> = { drone: "163,113,247", clap: "47,129,247", other: "139,148,158" };
+const INK = "#dde4ea", MUTE = "#8996a1", GRID = "#1b222a", EDGE = "#5d6b79";
+const GRADE_COLOR = { pass: "#66b07a", warn: "#cba653", fail: "#d4706a" } as const;
+const CLASS_RGB: Record<string, string> = { drone: "165,139,214", clap: "90,143,208", other: "137,150,161" };
 
 export class FloorMap {
   private ctx: CanvasRenderingContext2D;
@@ -100,7 +100,7 @@ export class FloorMap {
       const cw = (W * this.scale) / nx, ch = (H * this.scale) / ny;
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const v = values[j * nx + i] ?? 0;
-        ctx.fillStyle = `rgba(255,140,0,${(v * v * 0.7).toFixed(3)})`;
+        ctx.fillStyle = `rgba(203,166,83,${(v * v * 0.6).toFixed(3)})`;
         ctx.fillRect(this.ox + i * cw, this.oy + j * ch, cw + 0.5, ch + 0.5);
       }
     }
@@ -108,12 +108,7 @@ export class FloorMap {
     ctx.strokeStyle = GRID; ctx.lineWidth = 1; ctx.fillStyle = MUTE; ctx.font = "12px system-ui";
     for (let x = 0; x <= W + 1e-6; x++) { ctx.beginPath(); ctx.moveTo(this.px(x), this.py(0)); ctx.lineTo(this.px(x), this.py(H)); ctx.stroke(); ctx.fillText(`${x}`, this.px(x) - 3, this.py(0) - 6); }
     for (let y = 0; y <= H + 1e-6; y++) { ctx.beginPath(); ctx.moveTo(this.px(0), this.py(y)); ctx.lineTo(this.px(W), this.py(y)); ctx.stroke(); ctx.fillText(`${y}`, this.px(0) - 18, this.py(y) + 4); }
-    ctx.strokeStyle = EDGE; ctx.lineWidth = 1; ctx.strokeRect(this.px(0), this.py(0), W * this.scale, H * this.scale);
-    ctx.strokeStyle = "#2f81f7"; ctx.lineWidth = 3; const L = 22;
-    for (const [cx, cy, dx, dy] of [[0, 0, 1, 1], [W, 0, -1, 1], [0, H, 1, -1], [W, H, -1, -1]] as const) {
-      const x = this.px(cx), y = this.py(cy);
-      ctx.beginPath(); ctx.moveTo(x + dx * L, y); ctx.lineTo(x, y); ctx.lineTo(x, y + dy * L); ctx.stroke();
-    }
+    ctx.strokeStyle = EDGE; ctx.lineWidth = 1.5; ctx.strokeRect(this.px(0), this.py(0), W * this.scale, H * this.scale);
 
     if (m.showHyperbolas && last) this.drawHyperbolas(last);
 

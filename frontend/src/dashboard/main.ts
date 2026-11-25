@@ -61,14 +61,15 @@ function renderStatus() {
   markNext();
 }
 function markNext() {
-  const target = nextAction(session, online, phase);
+  let target: string | null = nextAction(session, online, phase);
+  if ((target === "startBtn" || target === "logBtn") && !judge) target = "judgeBtn"; // trial buttons only exist in judge mode
   document.querySelectorAll("[data-next]").forEach((el) => el.removeAttribute("data-next"));
   if (target) document.getElementById(target)?.setAttribute("data-next", "");
   const hint = $<HTMLButtonElement>("nextHint");
   hint.hidden = !target;
   if (target) { hint.dataset.target = target; hint.textContent = `Next: ${NEXT_LABEL[target]}`; }
 }
-const NEXT_LABEL = { qrBtn: "show phone QR", calBtn: "calibrate", startBtn: "start trial", logBtn: "log trial" } as const;
+const NEXT_LABEL: Record<string, string> = { qrBtn: "show phone QR", calBtn: "calibrate", judgeBtn: "open judge mode", startBtn: "start trial", logBtn: "log trial" };
 $("nextHint").addEventListener("click", () => {
   const el = document.getElementById($("nextHint").dataset.target ?? ""); el?.scrollIntoView({ block: "center", behavior: "smooth" }); el?.focus();
 });
@@ -210,7 +211,7 @@ $("recStop").addEventListener("click", () => void guard("recMsg", async () => {
 // ---- judge ------------------------------------------------------------------------------------------
 $("judgeBtn").addEventListener("click", () => {
   judge = !judge; document.body.classList.toggle("judge", judge); map.judgeMode = judge;
-  $("judgeBtn").textContent = judge ? "Leave judge mode" : "Judge mode"; map.invalidate();
+  $("judgeBtn").textContent = judge ? "Leave judge mode" : "Judge mode"; map.invalidate(); markNext();
 });
 map.onPick = (x, y) => setTruth(Math.round(x * 100) / 100, Math.round(y * 100) / 100);
 function setTruth(x: number, y: number) {
