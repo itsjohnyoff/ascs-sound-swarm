@@ -128,3 +128,7 @@ table th, table td { padding: 0.2rem 0.2rem; }
 #judge { display: none; } body.judge #judge { display: block; }
 body.judge aside { font-size: var(--step-1); } body.judge .status h1 { font-size: var(--step-3); }
 body.judge main { grid-template-columns: minmax(0, 1fr) 26rem; }
+
+/* status bar: tinted background only, no edge line or dot */
+.status { border-left: 0; grid-template-columns: 1fr auto; }
+.status .mark { display: none; }
