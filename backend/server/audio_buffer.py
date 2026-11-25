@@ -14,7 +14,7 @@ from shared.protocol import (
 )
 
 
-BUFFER_DURATION_S = 12
+BUFFER_DURATION_S = 30  # CONTRACTS 3
 SEQUENCE_MASK = (1 << 32) - 1
 SEQUENCE_HALF_RANGE = 1 << 31
 

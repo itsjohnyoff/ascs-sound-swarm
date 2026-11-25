@@ -22,6 +22,15 @@ CHIRP_TUKEY_ALPHA: float = 0.10
 CHIRP_AMPLITUDE: float = 0.85
 DUAL_CHIRP_GAP_S: float = 5.0
 
+# v2 timing (CONTRACTS 2-4)
+AUTO_CHIRP_PERIOD_S: float = 30.0      # periodic single chirp for a long drift baseline
+CLOCK_FIT_MAX_AGE_S: float = 600.0     # chirps older than this drop out of the clock fit
+PLAYOUT_SLACK_S: float = 0.4           # wait this long after an onset before extracting
+EVENT_WINDOW_PRE_S: float = 0.015      # clap window starts 15 ms before global onset
+EVENT_WINDOW_POST_S: float = 0.065     # clap window ends 65 ms after global onset
+SUSTAINED_WINDOW_S: float = 0.75       # drone window (3 x 250 ms, 50% hop)
+CHIRP_SUPPRESS_S: float = 0.3          # no detections within this of a scheduled chirp
+
 # ---------------------------------------------------------------------------
 # Binary WebSocket Frame Header (32 bytes, little-endian, 8-byte aligned)
 #   0..3   4s  magic ("ASCS")
@@ -45,7 +54,9 @@ FLAG_CLIPPING: int = 0x02
 
 SoundClass = Literal["drone", "clap", "other"]
 SyncState = Literal["unsynced", "synced", "drifting", "clock_jump"]
+# shortcut: "ggwave_hybrid" kept only because legacy DSP paths still accept it; drop with them.
 CalibrationMode = Literal["lfm_dual", "lfm_single", "ggwave_hybrid"]
+EventKind = Literal["transient", "sustained"]
 
 
 def speed_of_sound(temperature_c: float = 20.0) -> float:
@@ -215,6 +226,8 @@ class LocalizationResult(BaseModel):
     is_drone: bool = False
     class_confidence: float = 0.0
     class_probs: dict[str, float] = Field(default_factory=lambda: {"drone": 0.0, "clap": 0.0, "other": 1.0})
+    update_seq: int = 0  # v2: 0 for the first emission, increments on sustained re-emits
+    kind: EventKind = "transient"
 
 
 class EvalTrial(BaseModel):
@@ -231,6 +244,7 @@ class EvalTrial(BaseModel):
     class_confidence: float | None = None
     residual_ms: float | None = None
     timestamp_s: float = 0.0
+    inside_hull: bool | None = None  # v2: ground truth inside the connected phones' convex hull
 
 
 class EvalSummary(BaseModel):

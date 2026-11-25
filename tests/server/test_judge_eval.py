@@ -91,13 +91,13 @@ def test_csv_uses_contract_columns_and_quotes_labels():
     assert rows[0] == [
         "trial_idx", "label", "expected_class", "gt_x_m", "gt_y_m",
         "est_x_m", "est_y_m", "error_m", "missed", "pred_class",
-        "class_confidence", "residual_ms", "timestamp_s",
+        "class_confidence", "residual_ms", "timestamp_s", "inside_hull",
     ]
     assert rows[1] == [
         "1", label, "clap", "1.0", "2.0", "4.0", "6.0", "5.0", "False",
-        "drone", "0.9", "0.35", "123.0",
+        "drone", "0.9", "0.35", "123.0", "",
     ]
     assert rows[2] == [
         "2", "Pos 2", "other", "0.0", "0.0", "", "", "", "True", "", "", "",
-        str(missed.timestamp_s),
+        str(missed.timestamp_s), "",
     ]

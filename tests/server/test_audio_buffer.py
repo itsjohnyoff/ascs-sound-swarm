@@ -3,7 +3,7 @@ import struct
 import numpy as np
 import pytest
 
-from backend.server.audio_buffer import PhoneRingBuffer, decode_audio_frame
+from backend.server.audio_buffer import BUFFER_DURATION_S, PhoneRingBuffer, decode_audio_frame
 from shared.protocol import (
     FLAG_CLIPPING,
     FLAG_CLOCK_JUMP,
@@ -77,26 +77,26 @@ def test_empty_slice_reports_buffer_identity():
 
 def test_ring_wrap_preserves_exact_indices_and_snapshot():
     buffer = PhoneRingBuffer("phone-1", SAMPLE_RATE)
+    capacity = SAMPLE_RATE * BUFFER_DURATION_S
+    total = capacity + 4000
     start = 2**40 + 7
-    source = np.linspace(-0.5, 0.5, 100_000, dtype=np.float32)
-    first = make_frame(0, start, source[:50_000])
-    second = make_frame(1, start + 50_000, source[50_000:])
-    assert buffer.append(first)
-    assert buffer.append(second)
-    expected = np.concatenate((first.samples_f32, second.samples_f32))
+    source = np.linspace(-0.5, 0.5, total, dtype=np.float32)
+    frames = [make_frame(seq, start + k, source[k:k + 40_000]) for seq, k in enumerate(range(0, total, 40_000))]
+    assert all(buffer.append(frame) for frame in frames)
+    expected = np.concatenate([frame.samples_f32 for frame in frames])
 
-    all_recent = buffer.get_recent_slice(20)
-    assert buffer.latest_sample_index == start + 100_000
+    all_recent = buffer.get_recent_slice(BUFFER_DURATION_S + 10)
+    assert buffer.latest_sample_index == start + total
     assert all_recent.start_sample_index == start + 4000
     assert all_recent.samples_f32.flags.c_contiguous
-    np.testing.assert_array_equal(all_recent.samples_f32, expected[-96_000:])
+    np.testing.assert_array_equal(all_recent.samples_f32, expected[-capacity:])
 
     one_second = buffer.get_recent_slice(1)
-    assert one_second.start_sample_index == start + 92_000
+    assert one_second.start_sample_index == start + total - SAMPLE_RATE
     np.testing.assert_array_equal(one_second.samples_f32, expected[-SAMPLE_RATE:])
 
-    assert buffer.append(make_frame(2, start + 100_000, np.zeros(8000)))
-    np.testing.assert_array_equal(all_recent.samples_f32, expected[-96_000:])
+    assert buffer.append(make_frame(len(frames), start + total, np.zeros(8000)))
+    np.testing.assert_array_equal(all_recent.samples_f32, expected[-capacity:])  # snapshot is a copy
 
 
 def test_drops_count_once_and_snapshot_zero_fills_every_gap():
