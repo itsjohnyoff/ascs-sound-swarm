@@ -1,6 +1,8 @@
 import { FLAG_CLIPPING, FLAG_CLOCK_JUMP, encodeFrame } from "../shared/binaryFrame";
 import { wsUrl } from "../shared/api";
+import { isDebug } from "../shared/debug";
 import type { PhoneStatus, SessionState } from "../shared/types";
+import { Diagnostics } from "./diagnostics";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const ID_KEY = "ascs_phone_id";
@@ -16,6 +18,15 @@ export function getPhoneId(): string {
 }
 
 const phoneId = getPhoneId();
+const diag = new Diagnostics();
+let diagEl: HTMLElement | null = null;
+if (isDebug()) {
+  diagEl = document.createElement("pre");
+  diagEl.id = "diag";
+  diagEl.style.cssText = "font:12px ui-monospace,monospace;color:#8b949e;background:#161b22;padding:8px;border-radius:8px;margin:0;text-align:left";
+  document.body.appendChild(diagEl);
+  setInterval(() => { diagEl!.textContent = diag.lines().join("\n"); }, 500);
+}
 $("phoneId").textContent = phoneId;
 const warnings: string[] = [];
 const warn = (m: string) => { warnings.push(m); const w = $("warn"); w.hidden = false; w.textContent = warnings.join(" · "); };
@@ -45,6 +56,7 @@ async function openMic(): Promise<MediaStream> {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: chain[i]! });
       const s = stream.getAudioTracks()[0]?.getSettings();
+      diag.track = { aec: s?.echoCancellation, ns: s?.noiseSuppression, agc: s?.autoGainControl, channels: s?.channelCount };
       if (i > 0) warn(`mic constraints downgraded (level ${i})`);
       if (s && (s.echoCancellation || s.noiseSuppression || s.autoGainControl)) {
         warn(`browser processing ON (AEC=${s.echoCancellation} NS=${s.noiseSuppression} AGC=${s.autoGainControl})`);
@@ -102,6 +114,7 @@ function connect() {
   ws.onclose = () => {
     if (!joined) return;
     $("sync").className = "pill bad"; $("sync").textContent = "Reconnecting…";
+    diag.reconnects++;
     const delay = Math.min(8000, 500 * 2 ** retry++);
     pendingJump = true; // gap in the timeline while offline
     setTimeout(connect, delay);
@@ -114,6 +127,7 @@ async function join() {
     const stream = await openMic();
     ctx = new AudioContext(); // never force a rate: report the real one
     sampleRate = ctx.sampleRate;
+    diag.sampleRate = sampleRate;
     await ctx.audioWorklet.addModule("/pcm-worklet.js");
     const src = ctx.createMediaStreamSource(stream);
     node = new AudioWorkletNode(ctx, "pcm-worklet", { numberOfInputs: 1, numberOfOutputs: 0 });
@@ -127,14 +141,16 @@ async function join() {
       const bar = $("vuBar");
       bar.style.width = `${Math.min(100, Math.sqrt(rms) * 140)}%`;
       bar.classList.toggle("clip", clipping);
-      if (ws?.readyState !== WebSocket.OPEN) return;
+      diag.onBatch(startSampleIndex, pcm.length);
+      if (ws?.readyState !== WebSocket.OPEN) { diag.framesDropped++; return; }
       let flags = 0;
       if (clipping) flags |= FLAG_CLIPPING;
-      if (pendingJump) { flags |= FLAG_CLOCK_JUMP; pendingJump = false; }
+      if (pendingJump) { flags |= FLAG_CLOCK_JUMP; pendingJump = false; diag.clockJumps++; }
       ws.send(encodeFrame({
         flags, numSamples: pcm.length, seq: seq++, sampleRate,
         sampleIndex: startSampleIndex, clientTimeMs: performance.timeOrigin + performance.now(),
       }, pcm));
+      diag.framesSent++;
     };
 
     joined = true;

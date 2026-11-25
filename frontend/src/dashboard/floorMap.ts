@@ -22,6 +22,8 @@ export class FloorMap {
   onMoveSpeaker: (x: number, y: number) => void = () => {};
   onPick: (x: number, y: number) => void = () => {};
   private dirty = true;
+  /** Called after each draw with wall time and cost in ms (used by the ?debug=1 fps meter). */
+  onDraw: (now: number, costMs: number) => void = () => {};
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext("2d")!;
@@ -29,7 +31,10 @@ export class FloorMap {
     canvas.addEventListener("pointermove", (e) => this.move(e));
     canvas.addEventListener("pointerup", (e) => this.up(e));
     new ResizeObserver(() => { this.dirty = true; }).observe(canvas);
-    const loop = () => { if (this.dirty) { this.draw(); this.dirty = false; } requestAnimationFrame(loop); };
+    const loop = () => {
+      if (this.dirty) { const t0 = performance.now(); this.draw(); this.dirty = false; this.onDraw(t0, performance.now() - t0); }
+      requestAnimationFrame(loop);
+    };
     requestAnimationFrame(loop);
   }
 

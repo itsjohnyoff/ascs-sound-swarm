@@ -1,7 +1,9 @@
 import { api, wsUrl } from "../shared/api";
 import type { CalibrationResult, Detection, Phone, SessionState, Trial } from "../shared/types";
 import { isBusy, renderCalTable, runCalibration } from "./calibration";
+import { isDebug } from "../shared/debug";
 import { FloorMap } from "./floorMap";
+import { FpsMeter } from "./fps";
 import { errorM, insideHull, summarize } from "./judge";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -15,6 +17,16 @@ let trials: Trial[] = [];
 let judge = false;
 
 const map = new FloorMap($<HTMLCanvasElement>("map"));
+if (isDebug()) {
+  const meter = new FpsMeter();
+  const el = document.createElement("div");
+  el.id = "fps";
+  el.style.cssText = "position:fixed;left:8px;bottom:8px;font:12px ui-monospace,monospace;background:#161b22;color:#8b949e;padding:4px 8px;border-radius:6px";
+  document.body.appendChild(el);
+  map.onDraw = (now, cost) => meter.record(now, cost);
+  (window as unknown as { __fps: FpsMeter }).__fps = meter;
+  setInterval(() => { el.textContent = `draw ${meter.fps.toFixed(1)}/s · ${meter.avgCostMs.toFixed(2)} ms avg · ${meter.maxCostMs.toFixed(2)} ms max`; }, 500);
+}
 const refresh = () => {
   if (!session) return;
   map.model = {
@@ -192,5 +204,10 @@ $("resetBtn").addEventListener("click", () => { if (confirm("Clear all trials?")
 // ---- boot ----------------------------------------------------------------------------------
 void api.session().then((s) => applySession(s)).catch(() => {});
 void loadTrials().catch(() => {});
+// After a dashboard reload, restore the last detections so the judge list is not empty.
+void fetch("/api/detections/recent?limit=5").then((r) => r.json()).then((j: { detections: Detection[] }) => {
+  for (const d of [...j.detections].reverse()) if (!detections.some((x) => x.event_id === d.event_id)) detections.push(d);
+  renderRecent(); refresh();
+}).catch(() => {});
 renderRecent();
 connect();
