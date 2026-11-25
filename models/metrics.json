@@ -1,0 +1,120 @@
+{
+  "trained_at": "2026-11-25T10:36:48+00:00",
+  "model": "HistGradientBoostingClassifier",
+  "features": [
+    "crest",
+    "active_frac",
+    "comb",
+    "f0_hz",
+    "f0_stability",
+    "flatness",
+    "centroid_hz",
+    "concentration",
+    "low_ratio",
+    "mid_ratio",
+    "high_ratio",
+    "duration_s"
+  ],
+  "data": {
+    "windows": 1980,
+    "groups": 756,
+    "per_class": {
+      "drone": 980,
+      "clap": 500,
+      "other": 500
+    },
+    "per_origin": {
+      "droneaudioset": 480,
+      "synthetic": 1500
+    },
+    "args": {
+      "synthetic": 500,
+      "droneaudioset": 6,
+      "das_windows": 80,
+      "local": "data/train",
+      "seed": 0
+    }
+  },
+  "split": {
+    "method": "GroupShuffleSplit by source recording",
+    "train": 1446,
+    "test": 534,
+    "test_groups": 189
+  },
+  "held_out": {
+    "macro_f1": 0.9710389771641791,
+    "report": {
+      "drone": {
+        "precision": 0.9829931972789115,
+        "recall": 0.9763513513513513,
+        "f1-score": 0.9796610169491525,
+        "support": 296.0
+      },
+      "clap": {
+        "precision": 0.9663865546218487,
+        "recall": 0.9913793103448276,
+        "f1-score": 0.9787234042553191,
+        "support": 116.0
+      },
+      "other": {
+        "precision": 0.9586776859504132,
+        "recall": 0.9508196721311475,
+        "f1-score": 0.9547325102880658,
+        "support": 122.0
+      },
+      "accuracy": 0.9737827715355806,
+      "macro avg": {
+        "precision": 0.9693524792837245,
+        "recall": 0.9728501112757755,
+        "f1-score": 0.9710389771641791,
+        "support": 534.0
+      },
+      "weighted avg": {
+        "precision": 0.9738305326154357,
+        "recall": 0.9737827715355806,
+        "f1-score": 0.9737620639807305,
+        "support": 534.0
+      }
+    },
+    "confusion": {
+      "labels": [
+        "drone",
+        "clap",
+        "other"
+      ],
+      "matrix": [
+        [
+          289,
+          3,
+          4
+        ],
+        [
+          0,
+          115,
+          1
+        ],
+        [
+          5,
+          1,
+          116
+        ]
+      ]
+    },
+    "by_origin": {
+      "droneaudioset": {
+        "n": 160,
+        "accuracy": 0.9625
+      },
+      "synthetic": {
+        "n": 374,
+        "accuracy": 0.9786096256684492
+      }
+    }
+  },
+  "sim_judge_scenarios": {
+    "events": 30,
+    "accuracy": 1.0,
+    "median_ms": 14.231699999982084,
+    "p90_ms": 21.1439400000927
+  }
+}
