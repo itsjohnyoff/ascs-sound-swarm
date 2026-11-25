@@ -128,38 +128,43 @@ class Recording:
         arrays: dict[str, np.ndarray] = {}
         phones: dict[str, dict] = {}
         segments: dict[str, list[dict]] = {}
-        for original_id, tracks in self._tracks.items():
-            pid = quote(original_id, safe="")
-            primary = max(tracks, key=lambda track: track.captured_samples / track.sample_rate)
-            phones[pid] = primary.phone.model_dump(
-                mode="json", include={"phone_id", "label", "x_m", "y_m"},
-            )
-            arrays[f"{pid}_start_index"] = np.asarray(primary.start_index, dtype=np.uint64)
-            arrays[f"{pid}_fs"] = np.asarray(primary.sample_rate, dtype=np.int32)
-            segments[pid] = []
-            for i, track in enumerate(tracks):
-                if track is primary:
-                    pcm_key, mask_key = f"{pid}_pcm", f"{pid}_valid"
-                else:
-                    # Replay sees one clock epoch per phone. Keep the other audio
-                    # accessible in the archive without treating it as extra phones.
-                    pcm_key, mask_key = f"{pid}_epoch_{i}_samples", f"{pid}_epoch_{i}_mask"
-                arrays[pcm_key], arrays[mask_key] = track.arrays()
-                segments[pid].append({
-                    "start_index": track.start_index, "sample_rate": track.sample_rate,
-                    "samples_key": pcm_key, "valid_key": mask_key,
-                    "x_m": track.phone.x_m, "y_m": track.phone.y_m,
-                })
+        try:
+            for original_id, tracks in self._tracks.items():
+                pid = quote(original_id, safe="")
+                primary = max(tracks, key=lambda track: track.captured_samples / track.sample_rate)
+                phones[pid] = primary.phone.model_dump(
+                    mode="json", include={"phone_id", "label", "x_m", "y_m"},
+                )
+                arrays[f"{pid}_start_index"] = np.asarray(primary.start_index, dtype=np.uint64)
+                arrays[f"{pid}_fs"] = np.asarray(primary.sample_rate, dtype=np.int32)
+                segments[pid] = []
+                for i, track in enumerate(tracks):
+                    if track is primary:
+                        pcm_key, mask_key = f"{pid}_pcm", f"{pid}_valid"
+                    else:
+                        # Replay sees one clock epoch per phone. Keep the other audio
+                        # accessible in the archive without treating it as extra phones.
+                        pcm_key, mask_key = f"{pid}_epoch_{i}_samples", f"{pid}_epoch_{i}_mask"
+                    arrays[pcm_key], arrays[mask_key] = track.arrays()
+                    segments[pid].append({
+                        "start_index": track.start_index, "sample_rate": track.sample_rate,
+                        "samples_key": pcm_key, "valid_key": mask_key,
+                        "x_m": track.phone.x_m, "y_m": track.phone.y_m,
+                    })
 
-        arrays["meta"] = np.asarray(json.dumps({
-            "room": self.room.model_dump(mode="json"), "phones": phones, "segments": segments,
-            "started_at_s": self.started_at_s, "stopped_at_s": self.stopped_at_s,
-        }))
-        temporary_archive = self._root / "recording.npz"
-        with temporary_archive.open("wb") as output:
-            np.savez(output, **arrays)
-        # Publish atomically without clobbering an existing capture of the same name.
-        os.link(temporary_archive, self.path)
+            arrays["meta"] = np.asarray(json.dumps({
+                "room": self.room.model_dump(mode="json"), "phones": phones, "segments": segments,
+                "started_at_s": self.started_at_s, "stopped_at_s": self.stopped_at_s,
+            }))
+            temporary_archive = self._root / "recording.npz"
+            with temporary_archive.open("wb") as output:
+                np.savez(output, **arrays)
+            # Publish atomically without clobbering an existing capture of the same name.
+            os.link(temporary_archive, self.path)
+        finally:
+            for arr in arrays.values():
+                if isinstance(arr, np.memmap) and arr._mmap is not None:
+                    arr._mmap.close()
 
     def close(self) -> None:
         try:

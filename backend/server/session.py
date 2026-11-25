@@ -156,11 +156,29 @@ class Session:
         self._invalidate_clock(phone_id, "unsynced")
 
     def _invalidate_clock(self, phone_id: str, state: SyncState) -> None:
+        clock_fn = getattr(self.sync_engine, "clock", None)
+        old_ref = getattr(clock_fn(phone_id), "ref_phone_id", None) if callable(clock_fn) else None
         self.sync_engine.mark_clock_jump(phone_id)
-        # Losing the reference can unsync others too (v2 re-reference needs 2+ phones).
+        # Losing the reference can re-reference or unsync other phones (CONTRACTS 2).
+        rereferenced = old_ref == phone_id
         for pid, phone in self.phones.items():
-            if pid != phone_id and phone.sync_state in ("synced", "drifting") and not self.sync_engine.is_synced(pid):
-                self.phones[pid] = phone.model_copy(update={"sync_state": "unsynced", "residual_ms": None})
+            if pid == phone_id:
+                continue
+            if phone.sync_state in ("synced", "drifting") and not self.sync_engine.is_synced(pid):
+                self.phones[pid] = phone.model_copy(update={
+                    "sync_state": "unsynced", "residual_ms": None, "drift_ppm": None,
+                })
+            elif rereferenced and callable(clock_fn):
+                model = clock_fn(pid)
+                if model is not None:
+                    new_state: SyncState = "drifting" if model.residual_ms >= 0.5 else "synced"
+                    self.phones[pid] = phone.model_copy(update={
+                        "sync_state": new_state,
+                        "residual_ms": round(model.residual_ms, 4),
+                        "drift_ppm": round(model.drift_ppm, 2),
+                    })
+        if rereferenced:
+            self.clock_epoch += 1
         self.calibration_ends.pop(phone_id, None)
         self.phones[phone_id] = self.phones[phone_id].model_copy(update={
             "sync_state": state, "residual_ms": None, "drift_ppm": None,

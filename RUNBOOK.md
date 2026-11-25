@@ -14,7 +14,10 @@ python scripts/start_https.py --mode lan      # prints the join URL + QR; dashbo
 python scripts/start_https.py --mode tunnel   # backup over cloudflared
 ```
 
-Phones open `/phone.html`, tap **Join**, read their ID out loud. The dashboard is `/`, the laptop-speaker chirp page is `/chirp.html`.
+Phones open `/phone.html`, tap **Join**, read their ID out loud. The dashboard is `/`, the laptop-speaker chirp page is `/chirp.html`, and `/api/health` reports connected/synced phones and active classifier backend.
+
+- **LAN TLS trust:** without `mkcert`, phones see a self-signed cert warning once per IP — on iOS Safari tap *Show Details → visit this website*; on Android Chrome tap *Advanced → Proceed*.
+- **Network fallback:** prefer a phone hotspot or travel router so venue Wi-Fi AP isolation cannot block phones from reaching the laptop. Use `--mode tunnel` (`cloudflared`) only if LAN is blocked.
 
 ## Without phones (one laptop)
 
@@ -40,17 +43,30 @@ Soak (Gate 3 prep, about 11 min): `python scripts/soak.py --minutes 10 --out soa
 1. 2 to 4 phones (at least one iPhone, one Android) joined, positions entered.
 2. `curl -X POST https://<host>:8443/api/record/start -H 'content-type: application/json' -d '{"name":"spike-01"}' -k`
 3. Play 3 chirps 30 s apart from `/chirp.html`, then 5 claps at taped points.
-4. `curl -X POST https://<host>:8443/api/record/stop -k` -> `data/recordings/spike-01.npz`.
+4. `curl -X POST https://<host>:8443/api/record/stop -k` (or `?name=spike-01`) -> `data/recordings/spike-01.npz`.
 5. Add the clap points to the file's meta if you want TDOA checks (`meta["clap_points"] = [{"x_m":..,"y_m":..}]`), then
    `python -m analysis.spike data/recordings/spike-01.npz` and paste the table into `analysis/LOG.md`.
-   Gate 0 passes when every phone's residual is < 1 ms.
+   Gate 0 passes when every phone's residual is < 1 ms, 0 gaps, clipped < 1%, and `AGC/gate` is `OK`. See `analysis/venue_capture.md` for the full Gate 0 + venue classifier capture protocol.
 
-## Judged run
+## Judged run (Gate 2 & demo)
 
-1. Calibrate from the dashboard; keep periodic chirps on (CONTRACTS 2).
-2. Known-point check first: clap at a measured point, log it as the known point. It must be < 0.5 m.
-3. For each of the 10 positions: set the true point, chirp before the trial, make the sound, pick the matching detection or mark it missed.
-4. Export the CSV (`/api/eval/export.csv`).
+1. Pre-flight: verify `frontend/dist` is built (`npm run build`), all 4+ phones are green (`synced`), no GDOP warning, and room temperature is set.
+2. Start a recording (`POST /api/record/start` with `{"name": "<YYYY-MM-DD>-gate2"}`) so the session can be replayed and tuned afterwards.
+3. Calibrate from the dashboard; keep periodic auto-chirp (30 s) on (CONTRACTS 2).
+4. Known-point check first: clap at a measured point, log it as the known point (`POST /api/eval/known-point`). It must be < 0.5 m before judges begin.
+5. For each of the 10 positions: set the true point, chirp before the trial, make the sound (clap or drone), pick the matching detection from the last 5 detections or mark it missed.
+6. Export the CSV (`/api/eval/export.csv`), stop the recording (`POST /api/record/stop`), and log the mean/median/p90 error and recording path in `analysis/LOG.md`.
+
+## Drift soak (Gate 3)
+
+- **Virtual:** `python scripts/soak.py --minutes 10 --out analysis/soak-10m.md` (MUST pass: no crash, no phone disconnects, memory growth <= 50 MB, every chirp after the first calibrates, detection rate >= 90%).
+- **Real phones:** keep 4 phones connected for 10 minutes with auto-chirp on, record to `data/recordings/<YYYY-MM-DD>-gate3-soak.npz`, check dropped frames (< 1% target) and residuals (< 1 ms) without manual re-sync, and log in `analysis/LOG.md`.
+
+## Troubleshooting
+
+- **Phone disconnects or clock-jumps:** the server automatically re-references if the reference phone drops (when >= 2 synced phones remain) and marks the affected phone `clock_jump` / `unsynced`. Let the next auto-chirp (or click Calibrate) bring it back.
+- **GDOP warning:** spread phones around the room corners so they are not collinear and keep judge points inside their convex hull.
+- **No detections:** confirm >= 3 phones are `synced` on `/api/health`, check RMS bars on the dashboard, and verify no phone is stuck clipping.
 
 ### Tune a recorded run
 

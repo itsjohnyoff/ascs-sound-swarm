@@ -34,6 +34,12 @@ def test_v2_constants():
     assert protocol.SUSTAINED_WINDOW_S == 0.75
 
 
+def test_clock_model_in_shared_protocol():
+    from backend.dsp.clock import ClockModel as DspClockModel
+    assert hasattr(protocol, "ClockModel")
+    assert DspClockModel is protocol.ClockModel
+
+
 def _params(fn):
     return list(inspect.signature(fn).parameters)
 

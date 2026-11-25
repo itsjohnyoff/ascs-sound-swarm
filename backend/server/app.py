@@ -14,7 +14,7 @@ from typing import Literal
 
 import anyio
 import segno
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, FiniteFloat, ValidationError
@@ -54,8 +54,11 @@ class CalibrateSolve(CalibrateArm):
     window_s: float = Field(default=7.0, gt=0, le=BUFFER_DURATION_S)
 
 
+RECORDING_NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(?:\.npz)?$"
+
+
 class RecordStart(BaseModel):
-    name: str = Field(default="spike-01", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(?:\.npz)?$")
+    name: str = Field(default="spike-01", pattern=RECORDING_NAME_PATTERN)
 
 
 class NewTrial(BaseModel):
@@ -239,7 +242,10 @@ def create_app(
         return {"status": "recording", "path": str(path)}
 
     @app.post("/api/record/stop")
-    async def stop_recording(request: Request):
+    async def stop_recording(
+        request: Request,
+        name: str | None = Query(default=None, pattern=RECORDING_NAME_PATTERN),
+    ):
         session: Session = request.app.state.session
         recording = session.recording
         if recording is None or recording.saving:
@@ -250,6 +256,11 @@ def create_app(
         if not recording.has_audio:
             discard_recording(session)
             raise HTTPException(409, "Recording received no phone audio")
+        if name is not None:
+            target = recordings_dir / f"{name.removesuffix('.npz')}.npz"
+            if target.exists():
+                raise HTTPException(409, "A recording with this name already exists")
+            recording.path = target
 
         recording.stopped_at_s = recording.stopped_at_s or time.time()
         recording.saving = True
@@ -365,7 +376,8 @@ def create_app(
                     except ValueError:
                         continue
                     if session.ingest(phone_id, frame):
-                        push_status(session, phone_id)
+                        for pid in phones:
+                            push_status(session, pid)
                         broadcast(session.snapshot())
                 elif raw_text is not None:
                     try:
@@ -387,6 +399,8 @@ def create_app(
         finally:
             del phones[phone_id]
             session.disconnect(phone_id)
+            for pid in phones:
+                push_status(session, pid)
             broadcast(session.snapshot())
 
     if frontend_dir.is_dir():
