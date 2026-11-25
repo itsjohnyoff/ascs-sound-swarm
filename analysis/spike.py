@@ -32,6 +32,8 @@ class PhoneReport:
     residual_ms: float | None
     drift_ppm: float | None
     clipped_fraction: float
+    agc_gated: bool = False
+    agc_reason: str = ""
 
 
 @dataclass
@@ -60,6 +62,57 @@ def _gap_count(valid: np.ndarray | None) -> int:
     return int(np.sum(np.diff(np.concatenate([[0], invalid])) == 1))
 
 
+def _detect_agc_or_gating(
+    samples: np.ndarray,
+    fs: int,
+    valid_mask: np.ndarray | None = None,
+) -> tuple[bool, str]:
+    frame_len = max(1, int(round(0.02 * fs)))
+    n_frames = len(samples) // frame_len
+    if n_frames == 0:
+        return False, ""
+    trimmed = samples[: n_frames * frame_len].reshape(n_frames, frame_len).astype(np.float64, copy=False)
+    frame_rms = np.sqrt(np.mean(trimmed * trimmed, axis=1))
+    if valid_mask is not None:
+        frame_valid = valid_mask[: n_frames * frame_len].reshape(n_frames, frame_len).all(axis=1)
+    else:
+        frame_valid = np.ones(n_frames, dtype=bool)
+    valid_rms = frame_rms[frame_valid]
+    if len(valid_rms) == 0:
+        return False, ""
+
+    peak = float(np.max(np.abs(trimmed[frame_valid])))
+    if peak >= 0.02 and float(np.mean(valid_rms < 1e-5)) > 0.10:
+        return True, "noise-gated"
+
+    thresh = max(8.0 * float(np.median(valid_rms)), 0.03)
+    cand = np.flatnonzero(frame_valid & (frame_rms > thresh))
+    min_sep = max(1, int(round(1.0 / 0.02)))
+    peaks: list[int] = []
+    for idx in cand[np.argsort(frame_rms[cand])[::-1]]:
+        p = int(idx)
+        if all(abs(p - kept) >= min_sep for kept in peaks):
+            peaks.append(p)
+
+    lo_off = int(round(0.15 / 0.02))
+    hi_off = int(round(0.45 / 0.02))
+    dipped = 0
+    for p in peaks:
+        if p - hi_off < 0 or p + hi_off > n_frames:
+            continue
+        pre = slice(p - hi_off, p - lo_off)
+        post = slice(p + lo_off, p + hi_off)
+        if not (frame_valid[pre].all() and frame_valid[post].all()):
+            continue
+        pre_rms = float(np.median(frame_rms[pre]))
+        post_rms = float(np.median(frame_rms[post]))
+        if pre_rms > 0.0 and post_rms < 0.45 * pre_rms:
+            dipped += 1
+    if dipped >= 2:
+        return True, "agc-ducking"
+    return False, ""
+
+
 def _clap_points(meta: dict) -> list[tuple[float, float]]:
     if meta.get("clap_points"):
         return [(float(p["x_m"]), float(p["y_m"])) for p in meta["clap_points"]]
@@ -81,11 +134,13 @@ def analyze(path: str | Path) -> SpikeReport:
     phones = {}
     for pid, s in slices.items():
         model = engine.clock(pid)
+        agc_gated, agc_reason = _detect_agc_or_gating(s.samples_f32, s.sample_rate, s.valid_mask)
         phones[pid] = PhoneReport(
             fs=s.sample_rate, gap_count=_gap_count(s.valid_mask), chirps=chirps.get(pid, 0),
             residual_ms=None if model is None else round(model.residual_ms, 4),
             drift_ppm=None if model is None else round(model.drift_ppm, 2),
             clipped_fraction=float(np.mean(np.abs(s.samples_f32) >= 0.99)),
+            agc_gated=agc_gated, agc_reason=agc_reason,
         )
 
     c = speed_of_sound(session.room.temperature_c)
@@ -110,11 +165,12 @@ def analyze(path: str | Path) -> SpikeReport:
 
 def format_report(r: SpikeReport) -> str:
     lines = [f"# Spike report: {r.path}", "", f"Reference phone: {r.ref_phone_id}", "",
-             "| phone | fs | gaps | chirps | residual ms | drift ppm | clipped % |",
-             "| --- | --- | --- | --- | --- | --- | --- |"]
+             "| phone | fs | gaps | chirps | residual ms | drift ppm | clipped % | AGC/gate |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for pid, p in sorted(r.phones.items()):
+        agc_col = f"FLAG ({p.agc_reason})" if p.agc_gated else "OK"
         lines.append(f"| {pid} | {p.fs} | {p.gap_count} | {p.chirps} | {p.residual_ms} | {p.drift_ppm} | "
-                     f"{100 * p.clipped_fraction:.2f} |")
+                     f"{100 * p.clipped_fraction:.2f} | {agc_col} |")
     lines += ["", "| clap | t global s | point | max pair TDOA error ms |", "| --- | --- | --- | --- |"]
     for i, c in enumerate(r.claps, 1):
         lines.append(f"| {i} | {c.t_global_s:.3f} | {c.point} | {c.max_tdoa_error_ms:.3f} |")
