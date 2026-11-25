@@ -8,6 +8,12 @@ let busy = false;
 
 export const isBusy = () => busy;
 
+/** Create/resume the output AudioContext. Must run synchronously inside a user gesture (Safari/iOS). */
+export function unlockAudio(): void {
+  ctx ??= new AudioContext();
+  if (ctx.state !== "running") void ctx.resume();
+}
+
 export function grade(residualMs: number | null | undefined, synced: boolean): "PASS" | "WARN" | "FAIL" {
   if (!synced || residualMs == null) return "FAIL";
   return residualMs < 1 ? "PASS" : residualMs < 5 ? "WARN" : "FAIL";
@@ -20,9 +26,11 @@ export async function runCalibration(mode: Mode): Promise<CalibrationResult | nu
   try {
     const armed = await api.arm(mode);
     await sleep(250);
-    ctx ??= new AudioContext();
-    const fs = ctx.sampleRate;
-    await playBuffer(ctx, mode === "lfm_dual" ? generateDualChirp(fs) : generateChirp(fs));
+    unlockAudio();
+    if (ctx!.state !== "running") await ctx!.resume();
+    if (ctx!.state !== "running") throw new Error("Browser blocked sound. Click the page once and try again.");
+    const fs = ctx!.sampleRate;
+    await playBuffer(ctx!, mode === "lfm_dual" ? generateDualChirp(fs) : generateChirp(fs));
     await sleep(600);
     return await api.solve(armed.calibration_id, mode, mode === "lfm_dual" ? 7 : 4);
   } finally {

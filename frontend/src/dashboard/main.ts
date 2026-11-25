@@ -1,6 +1,6 @@
 import { api, wsUrl } from "../shared/api";
 import type { CalibrationResult, Detection, Phone, SessionState, Trial } from "../shared/types";
-import { isBusy, renderCalTable, runCalibration } from "./calibration";
+import { isBusy, renderCalTable, runCalibration, unlockAudio } from "./calibration";
 import { isDebug } from "../shared/debug";
 import { FloorMap } from "./floorMap";
 import { FpsMeter } from "./fps";
@@ -114,7 +114,9 @@ async function calibrate(mode: "lfm_dual" | "lfm_single") {
   } catch (e) { say("calMsg", (e as Error).message); }
   finally { $<HTMLButtonElement>("calBtn").disabled = false; }
 }
-$("calBtn").addEventListener("click", () => void calibrate("lfm_dual"));
+$("calBtn").addEventListener("click", () => { unlockAudio(); void calibrate("lfm_dual"); });
+// Any click unlocks sound so auto-chirp and judge chirps can play later without a gesture.
+document.addEventListener("pointerdown", () => unlockAudio());
 setInterval(() => { if ($<HTMLInputElement>("auto").checked && !isBusy() && session?.phones.some((p) => p.connected)) void calibrate("lfm_single"); }, 30_000);
 
 // ---- room panel ----------------------------------------------------------------------------
