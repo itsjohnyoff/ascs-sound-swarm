@@ -43,5 +43,6 @@ export async function playBuffer(ctx: AudioContext, samples: Float32Array): Prom
   await new Promise<void>((resolve) => {
     src.onended = () => resolve();
     src.start();
+    setTimeout(resolve, (samples.length / ctx.sampleRate) * 1000 + 1000); // never hang if onended is missed
   });
 }

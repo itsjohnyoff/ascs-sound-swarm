@@ -1,15 +1,22 @@
 import type { CalibrationResult, EvalSummary, Room, SessionState, Trial } from "./types";
 
+export const OFFLINE_MESSAGE = "Can't reach the server. Check that it's still running on the laptop.";
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new Error(OFFLINE_MESSAGE);
+  }
   if (!res.ok) {
-    let detail = res.statusText;
-    try { detail = JSON.stringify((await res.json()).detail ?? detail); } catch { /* not json */ }
-    throw new Error(`${method} ${path}: ${res.status} ${detail}`);
+    let detail = "";
+    try { const d = (await res.json()).detail; detail = typeof d === "string" ? d : JSON.stringify(d); } catch { /* not json */ }
+    throw new Error(detail ? `${detail}` : `The server refused the request (${res.status}).`);
   }
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
