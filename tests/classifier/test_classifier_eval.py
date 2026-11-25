@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from analysis.classifier_eval import (
+    BackendMetrics,
+    _extract_venue_events,
     evaluate_files,
     format_eval_report,
     main,
 )
 from backend.classifier.model import CLASSES
+from shared.chirp import generate_lfm_chirp
+from shared.protocol import PhoneAudioSlice
 from sim.room import DEFAULT_ROOM, SimEvent, default_phones, judge_scenario, save_npz, simulate
 
 
@@ -100,3 +106,47 @@ def test_eval_cli_json_and_markdown(tmp_path: Path, capsys) -> None:
     assert "heuristic" in payload
     assert "trained" in payload
     assert payload["heuristic"]["n_events"] == payload["trained"]["n_events"]
+
+
+def test_missing_venue_class_blocks_live_recommendation() -> None:
+    scores = dict(
+        confusion=[[4, 0, 0], [0, 0, 0], [0, 0, 4]],
+        per_class_f1={"drone": 1.0, "clap": 0.0, "other": 1.0},
+        macro_f1=1.0, median_ms=1.0, p90_ms=1.0, n_events=8,
+    )
+    heuristic = BackendMetrics("heuristic", "heuristic", **scores)
+    trained = BackendMetrics("trained", "hgb", **scores)
+
+    assert "missing usable examples for clap" in format_eval_report(heuristic, trained)
+    assert "Recommendation: use trained" not in format_eval_report(heuristic, trained)
+
+
+def test_uncalibrated_clap_uses_a_single_phone(tmp_path: Path) -> None:
+    fs = 48000
+    early = np.zeros(fs, dtype=np.float32)
+    late = np.zeros(fs, dtype=np.float32)
+    early[fs // 4 : fs // 4 + 480] = 0.9
+    late[fs // 4 + 4800 : fs // 4 + 5280] = 0.8
+    session = SimpleNamespace(
+        path=tmp_path / "venue-claps.npz", meta={},
+        slices={"early": PhoneAudioSlice("early", early, 0, fs),
+                "late": PhoneAudioSlice("late", late, 0, fs)},
+    )
+
+    [event] = _extract_venue_events(session)
+    assert set(event.aligned) == {"early"}
+    assert np.max(event.aligned["early"]) > 0.8
+
+
+def test_venue_clip_with_calibration_chirp_is_rejected(tmp_path: Path) -> None:
+    fs = 48000
+    samples = np.zeros(2 * fs, dtype=np.float32)
+    chirp = generate_lfm_chirp(fs=fs)
+    samples[fs : fs + len(chirp)] = chirp
+    session = SimpleNamespace(
+        path=tmp_path / "venue-noise.npz", meta={},
+        slices={"p1": PhoneAudioSlice("p1", samples, 0, fs)},
+    )
+
+    with pytest.raises(ValueError, match="calibration chirp"):
+        _extract_venue_events(session)

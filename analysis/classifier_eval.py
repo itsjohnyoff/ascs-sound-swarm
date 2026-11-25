@@ -20,6 +20,7 @@ from scipy.signal import resample_poly
 from backend.classifier.model import CLASSES, DEFAULT_MODEL_PATH, SoundClassifier
 from backend.dsp.pipeline import SyncEngine
 from backend.dsp.replay import load_recording_npz
+from backend.dsp.sync import detect_all_chirps
 from backend.server.events import TARGET_FS, find_events_offline
 from sim.room import true_time
 
@@ -115,19 +116,22 @@ def _extract_venue_events(session) -> list[LabeledEvent]:
         pid: _resample_to_target(s.samples_f32, s.sample_rate, getattr(s, "valid_mask", None))
         for pid, s in session.slices.items()
     }
-    min_len = min((len(x) for x in resampled.values()), default=0)
-    if min_len == 0:
+    if not resampled:
         return []
-    resampled = {pid: x[:min_len] for pid, x in resampled.items()}
+    # Track starts are independent without calibration. Score one phone per clip.
+    pid, samples = max(resampled.items(), key=lambda item: _rms(item[1]))
+    track = session.slices[pid]
+    if detect_all_chirps(track.samples_f32, track.sample_rate, valid_mask=track.valid_mask):
+        raise ValueError(f"{session.path}: calibration chirp detected. Recapture the venue clip with auto-chirp off.")
+    n_samples = len(samples)
 
     out: list[LabeledEvent] = []
     if label == "clap":
-        loudest = max(resampled.values(), key=_rms)
         hop = int(0.01 * TARGET_FS)
-        n_frames = min_len // hop
+        n_frames = n_samples // hop
         if n_frames == 0:
             return []
-        frame_rms = np.sqrt(np.mean(loudest[: n_frames * hop].reshape(n_frames, hop) ** 2, axis=1))
+        frame_rms = np.sqrt(np.mean(samples[: n_frames * hop].reshape(n_frames, hop) ** 2, axis=1))
         thresh = max(6.0 * float(np.median(frame_rms)), 0.02)
         sep_frames = int(round(0.35 / 0.01))
         pre = int(0.015 * TARGET_FS)
@@ -140,9 +144,8 @@ def _extract_venue_events(session) -> list[LabeledEvent]:
                 peak = i + int(np.argmax(frame_rms[i:peak_end]))
                 center = peak * hop + hop // 2
                 lo, hi = center - pre, center + post
-                if lo >= 0 and hi <= min_len:
-                    aligned = {pid: x[lo:hi] for pid, x in resampled.items()}
-                    out.append(LabeledEvent(session.path.name, "clap", aligned, TARGET_FS))
+                if lo >= 0 and hi <= n_samples:
+                    out.append(LabeledEvent(session.path.name, label, {pid: samples[lo:hi]}, TARGET_FS))
                 i = peak + sep_frames
             else:
                 i += 1
@@ -151,16 +154,15 @@ def _extract_venue_events(session) -> list[LabeledEvent]:
     # Sustained / background clips ("drone" or "other"): non-overlapping 0.75 s windows.
     win = int(0.75 * TARGET_FS)
     trim = int(0.25 * TARGET_FS)
-    if min_len < win:
+    if n_samples < win:
         return []
-    if min_len < 2 * trim + win:
+    if n_samples < 2 * trim + win:
         trim = 0
 
     windows: list[tuple[dict[str, np.ndarray], float]] = []
-    for start in range(trim, min_len - trim - win + 1, win):
-        aligned = {pid: x[start : start + win] for pid, x in resampled.items()}
-        max_rms = max(_rms(x) for x in aligned.values())
-        windows.append((aligned, max_rms))
+    for start in range(trim, n_samples - trim - win + 1, win):
+        window = samples[start : start + win]
+        windows.append(({pid: window}, _rms(window)))
 
     if not windows:
         return []
@@ -250,6 +252,17 @@ def _format_confusion(m: BackendMetrics) -> list[str]:
     return [f"### Confusion Matrix: {m.name} ({m.backend_name})", "", header, sep, *rows]
 
 
+def _recommendation(heuristic: BackendMetrics, trained: BackendMetrics) -> str:
+    missing = [cls for cls, row in zip(CLASSES, heuristic.confusion) if not sum(row)]
+    if missing:
+        return f"Insufficient coverage: missing usable examples for {', '.join(missing)}."
+    if trained.backend_name == "heuristic":
+        return "Recommendation: trained model unavailable (fell back to heuristic); using heuristic."
+    if trained.macro_f1 >= heuristic.macro_f1:
+        return f"Recommendation: use trained ({trained.backend_name}, macro F1 {trained.macro_f1:.4f} vs {heuristic.macro_f1:.4f})."
+    return f"Recommendation: use heuristic (macro F1 {heuristic.macro_f1:.4f} vs {trained.macro_f1:.4f})."
+
+
 def format_eval_report(heuristic: BackendMetrics, trained: BackendMetrics) -> str:
     lines = [
         "| backend | impl | events | drone F1 | clap F1 | other F1 | macro F1 | median ms/event | p90 ms/event |",
@@ -267,13 +280,7 @@ def format_eval_report(heuristic: BackendMetrics, trained: BackendMetrics) -> st
     lines.extend(_format_confusion(trained))
     lines.append("")
 
-    if trained.backend_name == "heuristic":
-        rec = "Recommendation: trained model unavailable (fell back to heuristic); using heuristic."
-    elif trained.macro_f1 >= heuristic.macro_f1:
-        rec = f"Recommendation: use trained ({trained.backend_name}, macro F1 {trained.macro_f1:.4f} vs {heuristic.macro_f1:.4f})."
-    else:
-        rec = f"Recommendation: use heuristic (macro F1 {heuristic.macro_f1:.4f} vs {trained.macro_f1:.4f})."
-    lines.append(rec)
+    lines.append(_recommendation(heuristic, trained))
     return "\n".join(lines)
 
 
@@ -284,9 +291,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="Print JSON output")
     args = ap.parse_args(argv)
 
-    heuristic, trained = evaluate_files(args.recordings, model_path=args.model)
+    try:
+        heuristic, trained = evaluate_files(args.recordings, model_path=args.model)
+    except ValueError as exc:
+        ap.error(str(exc))
     if args.json:
-        print(json.dumps({"heuristic": asdict(heuristic), "trained": asdict(trained)}, indent=2))
+        print(json.dumps({
+            "heuristic": asdict(heuristic),
+            "trained": asdict(trained),
+            "recommendation": _recommendation(heuristic, trained),
+        }, indent=2))
     else:
         print(format_eval_report(heuristic, trained))
     return 0

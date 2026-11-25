@@ -10,6 +10,7 @@ def test_venue_capture_protocol_has_required_sections():
         "-venue-claps.npz",
         "-venue-noise.npz",
         "-venue-drone.npz",
+        "Keep calibration chirps in the separate Gate 0 recording",
         "20 s",
         "python -m analysis.spike",
         "python -m analysis.classifier_eval",

@@ -23,7 +23,7 @@ If any phone fails Gate 0, fix the mic/browser constraint or replace that phone 
 
 ## 2. Venue Classifier Clips
 
-Record three separate `.npz` files with the same phone layout (chirps optional):
+Record three separate `.npz` files with the same phone layout. Keep calibration chirps in the separate Gate 0 recording and turn off **auto-chirp 30 s** in the dashboard for these clips. The evaluator asks for a fresh recording if it detects a calibration chirp on the selected phone.
 
 | File | Duration | Protocol |
 | --- | --- | --- |
@@ -43,9 +43,9 @@ python -m analysis.classifier_eval \
 ```
 
 - **Target:** macro F1 `> 0.9` on venue clips.
-- **Decision rule:** pick the live backend from **venue macro F1 only** (ignore synthetic-only scores).
+- **Decision rule:** run the comparison on venue clips alone. The evaluator uses the loudest phone in each clip because the tracks are uncalibrated. If any class has no usable examples, recapture it before choosing a backend.
   - If the trained model wins, keep `models/drone_classifier.joblib`.
-  - If the heuristic wins, delete `models/drone_classifier.joblib` so the server falls back to the heuristic backend automatically.
+  - If the heuristic wins, move `models/drone_classifier.joblib` out of `models/` and restart the server to load the heuristic backend.
 
 ## 4. Exact `analysis/LOG.md` Lines
 
