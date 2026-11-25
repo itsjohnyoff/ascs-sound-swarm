@@ -45,7 +45,7 @@ The virtual scenario plays chirps at t = 1 s and 11 s. Arm/solve around them (or
 
 ## Judged run
 
-1. Calibrate (button). Auto-chirp stays on (every 30 s).
-2. Judge mode -> known-point check: set a measured point, clap, **Log as known-point check**, then **Use** its detection. Badge must be green (< 0.5 m).
-3. For each of the 10 positions: click the true point, **Start trial** (plays a chirp first), make the sound, **Use** the matching detection or **Missed**.
-4. **Export CSV**.
+1. Calibrate from the dashboard; keep periodic chirps on (CONTRACTS 2).
+2. Known-point check first: clap at a measured point, log it as the known point. It must be < 0.5 m.
+3. For each of the 10 positions: set the true point, chirp before the trial, make the sound, pick the matching detection or mark it missed.
+4. Export the CSV (`/api/eval/export.csv`).
