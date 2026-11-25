@@ -25,11 +25,16 @@ def send_hello(socket, pid, fs=8000, x=0.5, y=0.5):
 
 def test_recording_lifecycle_empty_and_no_overwrite(tmp_path):
     with TestClient(create_app(recordings_dir=tmp_path)) as client:
+        assert client.get("/api/record/status").json() == {"status": "idle", "path": None}
         assert client.post("/api/record/stop").status_code == 409
         assert client.post("/api/record/start", json={"name": "../escape"}).status_code == 422
         assert client.post("/api/record/start").status_code == 200
+        assert client.get("/api/record/status").json() == {
+            "status": "recording", "path": str(tmp_path / "spike-01.npz"),
+        }
         assert client.post("/api/record/start", json={"name": "other"}).status_code == 409
         assert client.post("/api/record/stop").status_code == 409
+        assert client.get("/api/record/status").json() == {"status": "idle", "path": None}
         assert list(tmp_path.iterdir()) == []
 
         existing = tmp_path / "spike-01.npz"
@@ -179,6 +184,7 @@ def test_failed_publish_keeps_capture_for_retry(tmp_path):
         path = tmp_path / "spike-01.npz"
         path.write_bytes(b"existing")
         assert client.post("/api/record/stop").status_code == 409
+        assert client.get("/api/record/status").json() == {"status": "awaiting_save", "path": str(path)}
         assert path.read_bytes() == b"existing"
         path.unlink()
 

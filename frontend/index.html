@@ -6,15 +6,14 @@
 <title>ASCS Sound Swarm</title>
 </head>
 <body>
-  <header class="status" id="statusBar" data-tone="idle" role="status" aria-live="polite">
-    <span class="mark" aria-hidden="true"></span>
-    <div><h1 id="headline">Connecting…</h1><p id="detail"></p></div>
+  <header class="status" id="statusBar" data-tone="idle">
+    <div role="status"><h1 id="headline">Connecting…</h1><p id="detail"></p></div>
     <div class="tools">
       <button id="nextHint" hidden></button>
       <label class="inline" data-setup><input type="checkbox" id="heat"> Heatmap</label>
       <label class="inline" data-setup><input type="checkbox" id="hyp"> Timing curves</label>
       <button class="quiet" id="qrBtn" data-setup>Phone QR</button>
-      <button class="quiet" id="judgeBtn">Judge mode</button>
+      <button class="quiet" id="judgeBtn" aria-pressed="false" aria-controls="judge">Judge mode</button>
     </div>
   </header>
   <main>
@@ -23,41 +22,41 @@
       <div class="legend"><span><i style="background:var(--pass)"></i>Synced</span><span><i style="background:var(--warn)"></i>Loose</span><span><i style="background:var(--fail)"></i>Not synced</span></div>
     </div>
     <aside>
-      <section data-setup><h2><span class="n">1</span>Set up the room</h2>
+      <section data-setup><h2>Set up the room</h2>
         <p class="hint">Measure from the top-left corner, in meters. Drag on the map or type exact values.</p>
         <div class="row"><div><label for="rw">Width</label><input id="rw" type="number" step="0.01"></div><div><label for="rh">Height</label><input id="rh" type="number" step="0.01"></div><div><label for="rt">Temp °C</label><input id="rt" type="number" step="0.1"></div></div>
         <div class="row" style="margin-top:.6rem"><div><label for="sx">Speaker x</label><input id="sx" type="number" step="0.01"></div><div><label for="sy">Speaker y</label><input id="sy" type="number" step="0.01"></div><button id="roomBtn" class="quiet">Apply</button></div>
         <h3 style="font-size:var(--step-0);margin:1rem 0 .5rem">Phone positions</h3>
         <div id="phones"><p class="hint">Phones appear here when they join.</p></div>
         <div class="row"><button class="quiet" id="saveLayout">Save layout</button><button class="quiet" id="restoreLayout">Restore saved layout</button></div>
-        <p class="note" id="layoutMsg"></p>
+        <p class="note" id="layoutMsg" role="status"></p>
       </section>
-      <section data-setup><h2><span class="n">2</span>Sync the phones</h2>
+      <section data-setup><h2>Sync the phones</h2>
         <p class="hint">The laptop plays a short chirp so every phone can line up its clock. Raise the volume and keep the room quiet.</p>
         <div class="row"><button id="calBtn">Calibrate</button><label class="inline"><input type="checkbox" id="auto" checked> Repeat every 30 s</label></div>
-        <p class="note" id="calMsg"></p>
-        <table id="calTable"></table>
+        <p class="note" id="calMsg" role="status"></p>
+        <div class="table-scroll"><table id="calTable"></table></div>
         <h3 style="font-size:var(--step-0);margin:1rem 0 .5rem">Record a test</h3>
-        <div class="row"><div><label for="recName">File name</label><input id="recName" type="text" value="spike-01"></div><button id="recStart">Start recording</button><button id="recStop" class="danger" disabled>Stop and save</button></div>
-        <p class="note" id="recMsg"></p>
+        <div class="row record-actions"><div><label for="recName">File name</label><input id="recName" type="text" value="spike-01" maxlength="68"></div><button id="recStart" disabled>Start recording</button><button id="recStop" class="danger" disabled>Stop and save</button></div>
+        <p class="note" id="recMsg" role="status"></p>
       </section>
-      <section id="judge"><h2><span class="n">3</span>Judge run</h2>
-        <div class="strip" id="strip" aria-label="Trial results"></div>
+      <section id="judge"><h2>Judge run</h2>
+        <div class="strip" id="strip" aria-hidden="true"></div>
         <div class="stats" id="cards"></div>
         <div class="row"><div><label for="gx">True x</label><input id="gx" type="number" step="0.01"></div><div><label for="gy">True y</label><input id="gy" type="number" step="0.01"></div><div><label for="gc">Sound</label><select id="gc"><option value="clap">Clap</option><option value="drone">Drone</option></select></div></div>
         <p class="note" id="hullNote"></p>
         <label class="inline"><input type="checkbox" id="pre" checked> Play a chirp before each trial</label>
-        <p class="prompt" id="prompt"></p>
+        <p class="prompt" id="prompt" role="status"></p>
         <div class="row" id="trialBtns"></div>
         <div id="recent"></div>
-        <p class="note" id="status"></p>
-        <table id="trials"></table>
+        <p class="note" id="status" role="status"></p>
+        <div class="table-scroll"><table id="trials"></table></div>
         <div class="row" style="margin-top:.8rem"><button class="quiet" id="knownBtn">Check a known point</button><span id="knownBadge"></span></div>
-        <div class="row" style="margin-top:.6rem"><a href="/api/eval/export.csv" download style="flex:1;text-decoration:none"><button class="quiet" style="width:100%">Download CSV</button></a><button id="resetBtn" class="danger">Clear all trials</button></div>
+        <div class="row" style="margin-top:.6rem"><a class="button quiet" href="/api/eval/export.csv" download>Download CSV</a><button id="resetBtn" class="danger">Clear all trials</button></div>
       </section>
     </aside>
   </main>
-  <dialog id="qr"><div id="qrBody"></div><p id="qrUrl"></p><form method="dialog"><button>Close</button></form></dialog>
+  <dialog id="qr" aria-labelledby="qrTitle"><h2 id="qrTitle">Join on a phone</h2><div id="qrBody" aria-hidden="true"></div><p><a id="qrUrl"></a></p><form method="dialog"><button>Close</button></form></dialog>
   <script type="module" src="/src/dashboard/main.ts"></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { nextAction, readiness } from "../src/dashboard/readiness";
-import { isCandidate, trialPrompt, waitForTrialChirp } from "../src/dashboard/trialFlow";
+import { isCandidate, isRoomPoint, trialPrompt, waitForTrialChirp } from "../src/dashboard/trialFlow";
 import { micError, syncCopy } from "../src/phone/copy";
 import type { Detection, Phone, SessionState } from "../src/shared/types";
 
@@ -42,6 +42,10 @@ describe("next action", () => {
     expect(nextAction(session([phone(), phone(), phone()]), true, "listening")).toBeNull();
     expect(nextAction(null, true, "idle")).toBeNull();
   });
+  it("waits on poor geometry and suggests recalibration on loose timing", () => {
+    expect(nextAction(session([phone(), phone(), phone()], "collinear"), true, "idle")).toBeNull();
+    expect(nextAction(session([phone(), phone(), phone({ residual_ms: 1 })]), true, "idle")).toBe("calBtn");
+  });
 });
 
 describe("trial flow", () => {
@@ -74,6 +78,14 @@ describe("trial flow", () => {
   it("prompts", () => {
     expect(trialPrompt("idle", null, 1)).toContain("Set the true position");
     expect(trialPrompt("listening", { x: 2, y: 3 }, 1)).toBe("Make the sound at 2.00, 3.00 now.");
+  });
+  it("accepts room edges and rejects incomplete or off-map coordinates", () => {
+    const room = session([]).room;
+    expect(isRoomPoint(room, 0, 6)).toBe(true);
+    expect(isRoomPoint(room, 8, 0)).toBe(true);
+    expect(isRoomPoint(room, 8.01, 1)).toBe(false);
+    expect(isRoomPoint(room, -0.01, 1)).toBe(false);
+    expect(isRoomPoint(room, 1, NaN)).toBe(false);
   });
 });
 

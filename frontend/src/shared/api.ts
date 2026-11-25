@@ -43,6 +43,8 @@ export const api = {
   clearTrials: () => call<void>("DELETE", "/api/eval/trials"),
   joinInfo: () => call<{ join_url: string; qr_svg: string }>("GET", "/api/join-info"),
   recordStart: (name: string) => call<{ status: string; path: string }>("POST", "/api/record/start", { name }),
+  recordStatus: () =>
+    call<{ status: "idle" | "recording" | "saving" | "awaiting_save"; path: string | null }>("GET", "/api/record/status"),
   recordStop: () => call<{ status: string; path: string }>("POST", "/api/record/stop"),
 };
 

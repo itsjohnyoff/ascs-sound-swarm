@@ -226,6 +226,19 @@ def create_app(
             except OSError:
                 logger.exception("Could not clean up recording %s", recording.path)
 
+    @app.get("/api/record/status")
+    async def record_status(request: Request):
+        recording = request.app.state.session.recording
+        if recording is None:
+            return {"status": "idle", "path": None}
+        if recording.saving:
+            status = "saving"
+        elif recording.stopped_at_s is not None:
+            status = "awaiting_save"
+        else:
+            status = "recording"
+        return {"status": status, "path": str(recording.path)}
+
     @app.post("/api/record/start")
     async def start_recording(request: Request, body: RecordStart = RecordStart()):
         session: Session = request.app.state.session

@@ -1,6 +1,10 @@
-import type { CalibrationResult, Detection } from "../shared/types";
+import type { CalibrationResult, Detection, Room } from "../shared/types";
 
 export type TrialPhase = "idle" | "chirping" | "listening" | "review";
+
+export function isRoomPoint(room: Room, x: number, y: number): boolean {
+  return x >= 0 && x <= room.width_m && y >= 0 && y <= room.height_m;
+}
 
 /** Evaluate a live WebSocket message against the current phase without comparing wall clocks. */
 export function isCandidate(d: Detection, phase: TrialPhase, isNew: boolean): boolean {

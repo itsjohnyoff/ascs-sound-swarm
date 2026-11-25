@@ -7,7 +7,7 @@ import { FpsMeter } from "./fps";
 import { errorM, insideHull, summarize } from "./judge";
 import { nextAction, readiness } from "./readiness";
 import { phonesToSpread } from "./placement";
-import { isCandidate, trialPrompt, waitForTrialChirp, type TrialPhase } from "./trialFlow";
+import { isCandidate, isRoomPoint, trialPrompt, waitForTrialChirp, type TrialPhase } from "./trialFlow";
 import "./style.css";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -23,6 +23,8 @@ let candidate: Detection | null = null;
 let trials: Trial[] = [];
 let phase: TrialPhase = "idle";
 let judge = false;
+let trialSaving = false;
+let knownPointAfter: string | undefined;
 
 const map = new FloorMap($<HTMLCanvasElement>("map"));
 
@@ -48,7 +50,8 @@ const refresh = () => {
 };
 const say = (id: string, msg: string, isError = false) => { const el = $(id); el.textContent = msg; el.classList.toggle("err", isError); };
 const guard = async (id: string, fn: () => Promise<unknown>) => {
-  try { await fn(); say(id, ""); } catch (e) { say(id, (e as Error).message, true); }
+  say(id, "");
+  try { await fn(); } catch (e) { say(id, (e as Error).message, true); }
 };
 
 // ---- status bar -------------------------------------------------------------------------
@@ -62,16 +65,23 @@ function renderStatus() {
 }
 function markNext() {
   let target: string | null = nextAction(session, online, phase);
-  if ((target === "startBtn" || target === "logBtn") && !judge) target = "judgeBtn"; // trial buttons only exist in judge mode
-  document.querySelectorAll("[data-next]").forEach((el) => el.removeAttribute("data-next"));
-  if (target) document.getElementById(target)?.setAttribute("data-next", "");
+  if ((!judge && (target === "startBtn" || target === "logBtn")) ||
+      (judge && (target === "qrBtn" || target === "calBtn"))) target = "judgeBtn";
+  const next = target ? document.getElementById(target) : null;
   const hint = $<HTMLButtonElement>("nextHint");
-  hint.hidden = !target;
-  if (target) { hint.dataset.target = target; hint.textContent = `Next: ${NEXT_LABEL[target]}`; }
+  hint.hidden = !next || next.matches(":disabled");
+  const previous = document.querySelector("[data-next]");
+  if (previous !== next || hint.hidden) previous?.removeAttribute("data-next");
+  if (hint.hidden || !next) return;
+  next.setAttribute("data-next", "");
+  hint.dataset.target = next.id;
+  hint.textContent = `Next: ${next.id === "judgeBtn" && judge ? "return to setup" : NEXT_LABEL[next.id]}`;
 }
 const NEXT_LABEL: Record<string, string> = { qrBtn: "show phone QR", calBtn: "calibrate", judgeBtn: "open judge mode", startBtn: "start trial", logBtn: "log trial" };
 $("nextHint").addEventListener("click", () => {
-  const el = document.getElementById($("nextHint").dataset.target ?? ""); el?.scrollIntoView({ block: "center", behavior: "smooth" }); el?.focus();
+  const el = document.getElementById($("nextHint").dataset.target ?? "");
+  el?.scrollIntoView({ block: "center" });
+  el?.focus({ preventScroll: true });
 });
 function flashStatus() {
   const bar = $("statusBar"); bar.classList.remove("flash"); void bar.offsetWidth; bar.classList.add("flash");
@@ -149,7 +159,7 @@ function showCalibration(r: CalibrationResult) {
   say("calMsg", r.success
     ? `${r.synced_count} of ${total} phones synced. Worst timing error ${r.max_residual_ms?.toFixed(2) ?? "–"} ms.`
     : "Calibration failed. Check the speaker volume and try again.", !r.success);
-  renderCalTable($("calTable"), r);
+  renderCalTable($<HTMLTableElement>("calTable"), r);
 }
 
 // ---- detections ---------------------------------------------------------------------------
@@ -168,12 +178,14 @@ function onDetection(d: Detection) {
 async function calibrate(mode: "lfm_dual" | "lfm_single"): Promise<CalibrationResult | null> {
   if (isBusy()) return null;
   $<HTMLButtonElement>("calBtn").disabled = true; say("calMsg", "Playing the chirp…");
+  markNext();
   try {
     const r = await runCalibration(mode);
     if (r) showCalibration(r);
     return r;
   } finally {
     $<HTMLButtonElement>("calBtn").disabled = false;
+    markNext();
   }
 }
 const showCalError = (e: Error) => say("calMsg", e.message, true);
@@ -207,38 +219,99 @@ $("restoreLayout").addEventListener("click", () => void guard("layoutMsg", async
 }));
 
 $("qrBtn").addEventListener("click", () => void guard("layoutMsg", async () => {
-  const j = await api.joinInfo(); $("qrBody").innerHTML = j.qr_svg; $("qrUrl").textContent = j.join_url;
+  const j = await api.joinInfo();
+  $("qrBody").innerHTML = j.qr_svg;
+  const link = $<HTMLAnchorElement>("qrUrl");
+  link.href = j.join_url;
+  link.textContent = j.join_url;
   $<HTMLDialogElement>("qr").showModal();
 }));
 
 // ---- recorder ----------------------------------------------------------------------------------
-$("recStart").addEventListener("click", () => void guard("recMsg", async () => {
-  const r = await api.recordStart($<HTMLInputElement>("recName").value.trim() || "spike-01");
-  say("recMsg", `Recording to ${r.path}. Play your chirps and claps, then stop.`);
-  $<HTMLButtonElement>("recStart").disabled = true; $<HTMLButtonElement>("recStop").disabled = false;
+const recordName = $<HTMLInputElement>("recName");
+const recordStart = $<HTMLButtonElement>("recStart");
+const recordStop = $<HTMLButtonElement>("recStop");
+async function restoreRecording(announce: boolean) {
+  const current = await api.recordStatus();
+  recordName.disabled = recordStart.disabled = current.status !== "idle";
+  recordStop.disabled = current.status === "idle" || current.status === "saving";
+  recordStop.textContent = current.status === "awaiting_save" ? "Retry save" : "Stop and save";
+  if (announce && current.path) {
+    const action = current.status === "recording" ? "Recording to"
+      : current.status === "saving" ? "Saving" : "Ready to retry saving";
+    say("recMsg", `${action} ${current.path}.`);
+  } else if (announce) {
+    say("recMsg", "");
+  }
+  if (current.status === "saving") {
+    setTimeout(() => { void restoreRecording(announce).catch((e: Error) => say("recMsg", e.message, true)); }, 500);
+  }
+}
+recordStart.addEventListener("click", () => void guard("recMsg", async () => {
+  recordStart.disabled = true;
+  const name = recordName.value.trim() || "spike-01";
+  try {
+    const r = await api.recordStart(name);
+    say("recMsg", `Recording to ${r.path}. Play your chirps and claps, then stop.`);
+    recordName.disabled = true;
+    recordStop.disabled = false;
+    recordStop.textContent = "Stop and save";
+  } catch (e) {
+    recordStart.disabled = false;
+    await restoreRecording(false).catch(() => {});
+    throw e;
+  }
 }));
-$("recStop").addEventListener("click", () => void guard("recMsg", async () => {
-  const r = await api.recordStop();
-  say("recMsg", `Saved ${r.path}. Check it with: python -m backend.dsp.replay ${r.path}`);
-  $<HTMLButtonElement>("recStart").disabled = false; $<HTMLButtonElement>("recStop").disabled = true;
+recordStop.addEventListener("click", () => void guard("recMsg", async () => {
+  recordStop.disabled = true;
+  say("recMsg", "Saving the recording…");
+  try {
+    const r = await api.recordStop();
+    say("recMsg", `Saved ${r.path}. Check it with: python -m backend.dsp.replay ${r.path}`);
+    recordName.disabled = false;
+    recordStart.disabled = false;
+  } catch (e) {
+    recordStop.disabled = false;
+    await restoreRecording(false).catch(() => {});
+    throw e;
+  }
 }));
+void restoreRecording(true).catch(() => { recordStart.disabled = false; });
 
 // ---- judge ------------------------------------------------------------------------------------------
 $("judgeBtn").addEventListener("click", () => {
   judge = !judge; document.body.classList.toggle("judge", judge); map.judgeMode = judge;
-  $("judgeBtn").textContent = judge ? "Leave judge mode" : "Judge mode"; map.invalidate(); markNext();
+  $("judgeBtn").textContent = judge ? "Leave judge mode" : "Judge mode";
+  $("judgeBtn").setAttribute("aria-pressed", String(judge));
+  map.invalidate(); markNext();
 });
 map.onPick = (x, y) => setTruth(Math.round(x * 100) / 100, Math.round(y * 100) / 100);
-function setTruth(x: number, y: number) {
-  truth = { x, y }; candidate = null;
-  if (phase === "review") phase = "listening";
-  $<HTMLInputElement>("gx").value = String(x); $<HTMLInputElement>("gy").value = String(y);
+function setTruth(x: number, y: number, updateFields = true) {
+  if (trialSaving) return;
+  truth = { x, y };
+  knownPointAfter = detections.at(-1)?.event_id;
+  $("knownBadge").textContent = "";
+  if (updateFields) {
+    $<HTMLInputElement>("gx").value = String(x);
+    $<HTMLInputElement>("gy").value = String(y);
+  }
   const live = session?.phones.filter((p) => p.connected) ?? [];
   say("hullNote", live.length >= 3 && !insideHull(x, y, live) ? "This point is outside the area the phones surround. Expect a larger error." : "");
   renderTrialPanel(); refresh();
 }
-const typed = () => { const x = num("gx"), y = num("gy"); if (isFinite(x) && isFinite(y)) setTruth(x, y); };
-$("gx").addEventListener("change", typed); $("gy").addEventListener("change", typed);
+const typed = () => {
+  const x = num("gx"), y = num("gy");
+  if (session && isRoomPoint(session.room, x, y)) {
+    setTruth(x, y, false);
+    return;
+  }
+  truth = null;
+  $("knownBadge").textContent = "";
+  say("hullNote", Number.isFinite(x) && Number.isFinite(y) ? "Enter coordinates inside the room." : "");
+  renderTrialPanel();
+  refresh();
+};
+$("gx").addEventListener("input", typed); $("gy").addEventListener("input", typed);
 
 const fmtTime = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const chip = (c: string) => `<span class="chip ${c}">${c === "drone" ? "Drone" : c === "clap" ? "Clap" : "Other"}</span>`;
@@ -246,7 +319,8 @@ const chip = (c: string) => `<span class="chip ${c}">${c === "drone" ? "Drone" :
 function renderTrialPanel() {
   $("prompt").textContent = trialPrompt(phase, truth, trials.length + 1);
   const btns = $("trialBtns");
-  const b = (id: string, label: string, cls = "") => `<button id="${id}" class="${cls}">${label}</button>`;
+  const b = (id: string, label: string, cls = "") =>
+    `<button id="${id}" class="${cls}" ${trialSaving || (!truth && id !== "cancelBtn") ? "disabled" : ""}>${label}</button>`;
   if (phase === "idle") btns.innerHTML = b("startBtn", "Start trial");
   else if (phase === "chirping") btns.innerHTML = "";
   else if (phase === "listening") btns.innerHTML = b("missBtn", "Mark as missed", "quiet") + b("cancelBtn", "Cancel", "quiet");
@@ -291,14 +365,31 @@ function body(ev: Detection | null) {
 }
 
 async function logTrial(ev: Detection | null) {
+  if (trialSaving || !truth) return;
+  trialSaving = true;
+  $<HTMLInputElement>("gx").disabled = true;
+  $<HTMLInputElement>("gy").disabled = true;
+  $<HTMLSelectElement>("gc").disabled = true;
+  say("status", "Saving trial…");
+  renderTrialPanel();
   try {
-    await api.addTrial(body(ev));
-    const n = trials.length + 1;
-    say("status", ev && truth ? `Position ${n} logged: ${errorM(ev, truth.x, truth.y).toFixed(2)} m off.` : `Position ${n} logged as missed.`);
+    const saved = await api.addTrial(body(ev));
+    trials = [...trials.filter((trial) => trial.trial_idx !== saved.trial_idx), saved];
+    say("status", saved.error_m == null ? `Position ${saved.trial_idx} logged as missed.`
+      : `Position ${saved.trial_idx} logged: ${saved.error_m.toFixed(2)} m off.`);
     truth = null; candidate = null; phase = "idle";
     $<HTMLInputElement>("gx").value = ""; $<HTMLInputElement>("gy").value = ""; say("hullNote", "");
-    await loadTrials(); renderTrialPanel(); refresh();
-  } catch (e) { say("status", (e as Error).message, true); }
+    renderTrials();
+    refresh();
+  } catch (e) {
+    say("status", (e as Error).message, true);
+  } finally {
+    trialSaving = false;
+    $<HTMLInputElement>("gx").disabled = false;
+    $<HTMLInputElement>("gy").disabled = false;
+    $<HTMLSelectElement>("gc").disabled = false;
+    renderTrialPanel();
+  }
 }
 
 function renderRecent(show = false) {
@@ -315,11 +406,22 @@ $("recent").addEventListener("click", (ev) => {
 });
 
 $("knownBtn").addEventListener("click", () => void guard("status", async () => {
-  const d = candidate ?? detections[detections.length - 1];
-  if (!truth || !d) throw new Error("Set the true position, then make a sound so there is a detection to check.");
-  const err = errorM(d, truth.x, truth.y);
-  $("knownBadge").innerHTML = `<span class="badge ${err < 0.5 ? "pass" : "fail"}">${err.toFixed(2)} m · ${err < 0.5 ? "within 0.5 m" : "too far, recheck positions"}</span>`;
-  try { await api.addKnownPoint({ ...body(d), label: "Known point" }); } catch { /* the badge above already shows the result */ }
+  const point = truth;
+  const d = candidate ?? detections.at(-1);
+  if (!point || !d || (!candidate && d.event_id === knownPointAfter)) {
+    throw new Error("Set the true position, then make a sound so there is a detection to check.");
+  }
+  const button = $<HTMLButtonElement>("knownBtn");
+  button.disabled = true;
+  $("knownBadge").textContent = "";
+  try {
+    const saved = await api.addKnownPoint({ ...body(d), label: "Known point" });
+    const err = saved.error_m;
+    if (truth !== point || err == null) return;
+    $("knownBadge").innerHTML = `<span class="badge ${err < 0.5 ? "pass" : "fail"}">${err.toFixed(2)} m · ${err < 0.5 ? "within 0.5 m" : "too far, recheck positions"}</span>`;
+  } finally {
+    button.disabled = false;
+  }
 }));
 
 async function loadTrials() { const r = await api.trials(); trials = r.trials; renderTrials(); }
@@ -336,7 +438,10 @@ function renderTrials() {
   $("trials").innerHTML = trials.length ? `<tr><th>#</th><th>True x, y</th><th>Error</th><th>Heard</th><th>Inside</th></tr>` + trials.map((t) =>
     `<tr><td>${t.trial_idx}</td><td>${t.gt_x_m.toFixed(1)}, ${t.gt_y_m.toFixed(1)}</td><td>${t.missed ? "Missed" : f(t.error_m) + " m"}</td><td>${t.pred_class ? chip(t.pred_class) : "–"}</td><td>${(t.inside_hull ?? insideHull(t.gt_x_m, t.gt_y_m, hull)) ? "Yes" : "No"}</td></tr>`).join("") : "";
 }
-$("resetBtn").addEventListener("click", () => { if (confirm(`Clear all ${trials.length} logged trials? This can't be undone.`)) void guard("status", async () => { await api.clearTrials(); await loadTrials(); }); });
+$("resetBtn").addEventListener("click", () => {
+  if (trialSaving || !trials.length || !confirm(`Clear all ${trials.length} logged trials? This can't be undone.`)) return;
+  void guard("status", async () => { await api.clearTrials(); await loadTrials(); renderTrialPanel(); });
+});
 
 // ---- boot ----------------------------------------------------------------------------------------
 void api.session().then((s) => { online = true; applySession(s); }).catch(() => { say("status", OFFLINE_MESSAGE, true); renderStatus(); });
