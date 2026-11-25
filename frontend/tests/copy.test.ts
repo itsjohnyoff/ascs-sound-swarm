@@ -68,3 +68,23 @@ describe("phone copy", () => {
     expect(micError({}, false)).toContain("HTTPS");
   });
 });
+
+import { phonesToSpread, slots } from "../src/dashboard/placement";
+
+describe("placement", () => {
+  const room = session([]).room;
+  it("moves stacked unsynced phones to free edge spots, keeping the first", () => {
+    const ph = [phone({ phone_id: "a", x_m: 0, y_m: 0, sync_state: "unsynced" }), phone({ phone_id: "b", x_m: 0, y_m: 0, sync_state: "unsynced" }), phone({ phone_id: "c", x_m: 0, y_m: 0, sync_state: "unsynced" })];
+    const moves = phonesToSpread(ph, room, new Set());
+    expect(moves.map((m) => m.id)).toEqual(["b", "c"]);
+    expect(moves[0]).toMatchObject(slots(room)[0]!);
+    expect(Math.hypot(moves[0]!.x - moves[1]!.x, moves[0]!.y - moves[1]!.y)).toBeGreaterThan(0.5);
+  });
+  it("leaves synced, offline, already-placed and lone phones alone", () => {
+    const stacked = [phone({ phone_id: "a", sync_state: "unsynced" }), phone({ phone_id: "b", sync_state: "unsynced" })];
+    expect(phonesToSpread([stacked[0]!], room, new Set())).toEqual([]);
+    expect(phonesToSpread([stacked[0]!, { ...stacked[1]!, sync_state: "synced" }], room, new Set())).toEqual([]);
+    expect(phonesToSpread([stacked[0]!, { ...stacked[1]!, connected: false }], room, new Set())).toEqual([]);
+    expect(phonesToSpread(stacked, room, new Set(["b"]))).toEqual([]);
+  });
+});

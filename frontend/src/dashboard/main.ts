@@ -6,6 +6,7 @@ import { FloorMap } from "./floorMap";
 import { FpsMeter } from "./fps";
 import { errorM, insideHull, summarize } from "./judge";
 import { nextAction, readiness } from "./readiness";
+import { phonesToSpread } from "./placement";
 import { isCandidate, trialPrompt, type TrialPhase } from "./trialFlow";
 import "./style.css";
 
@@ -78,8 +79,15 @@ function flashStatus() {
 }
 
 // ---- session / sockets ---------------------------------------------------------------------
+const spread = new Set<string>();
 function applySession(s: SessionState) {
   session = s;
+  // Phones that join on top of each other get their own spot so every dot is visible.
+  for (const m of phonesToSpread(s.phones, s.room, spread)) {
+    spread.add(m.id);
+    const p = s.phones.find((q) => q.phone_id === m.id);
+    void api.putPhone(m.id, { label: p?.label, x_m: m.x, y_m: m.y }).catch(() => {});
+  }
   if (document.activeElement?.tagName !== "INPUT") fillForms(s);
   renderPhones(s.phones);
   renderStatus(); renderTrials(); refresh();
@@ -101,11 +109,16 @@ function renderPhones(phones: Phone[]) {
   if (box.contains(document.activeElement) && document.activeElement?.tagName === "INPUT") return;
   if (!phones.length) { box.innerHTML = `<p class="hint">Phones appear here when they join.</p>`; return; }
   box.innerHTML = phones.map((p) => `<div class="phone-row" data-id="${esc(p.phone_id)}">
-    <small>${esc(p.phone_id)} · ${stateWords(p)}</small>
+    <small>${esc(p.phone_id)} · ${stateWords(p)}${p.connected ? "" : ` <button class="quiet" data-remove="${esc(p.phone_id)}" style="min-height:1.5rem;padding:0 .5rem;font-size:.75rem">Remove</button>`}</small>
     <div><label>Name</label><input data-k="label" value="${esc(p.label)}" placeholder="e.g. North"></div>
     <div><label>x</label><input data-k="x" type="number" step="0.01" value="${p.x_m}"></div>
     <div><label>y</label><input data-k="y" type="number" step="0.01" value="${p.y_m}"></div></div>`).join("");
 }
+
+$("phones").addEventListener("click", (ev) => {
+  const id = (ev.target as HTMLElement).dataset.remove; if (!id) return;
+  api.deletePhone(id).then(() => say("layoutMsg", `Removed ${id}.`)).catch((e: Error) => say("layoutMsg", e.message, true));
+});
 
 $("phones").addEventListener("change", (ev) => {
   const row = (ev.target as HTMLElement).closest<HTMLElement>("[data-id]"); if (!row) return;
