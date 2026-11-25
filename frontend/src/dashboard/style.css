@@ -1,10 +1,11 @@
 :root {
-  --ground: #f2f4f1; --surface: #ffffff; --ink: #17252a; --mute: #5a6a66; --rule: #d5dbd6; --rule-strong: #aab5ae;
-  --pass: #1e7a4c; --warn: #b7791f; --fail: #c23b22; --accent: #2b3fd9;
-  --drone: #7a3fb5; --clap: #2b3fd9; --other: #6b7773;
-  --pass-bg: #e3f1e9; --warn-bg: #f7ecd6; --fail-bg: #f8e1dc; --idle-bg: #e8ece9;
-  --font: "Avenir Next", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --ground: #0b0f14; --surface: #0f141b; --panel: #161b22; --ink: #e8eef5; --mute: #8b949e; --rule: #2a323c; --rule-strong: #3d4854;
+  --pass: #3fb950; --warn: #d29922; --fail: #f85149; --accent: #2f81f7; --next: #ffd33d;
+  --drone: #a371f7; --clap: #2f81f7; --other: #8b949e;
+  --pass-bg: #0f2a1a; --warn-bg: #2d2208; --fail-bg: #3a1513; --idle-bg: #161b22;
+  --font: "Avenir Next Condensed", "Avenir Next", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --step--1: 0.8125rem; --step-0: 0.9375rem; --step-1: 1.125rem; --step-2: 1.5rem; --step-3: 2.125rem;
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -82,3 +83,46 @@ body.judge .stats b { font-size: var(--step-3); } body.judge .legend { font-size
 
 @media (max-width: 62rem) { main { grid-template-columns: 1fr; grid-template-rows: 55vh auto; } aside { border-left: 0; border-top: 1px solid var(--rule-strong); } }
 @media (prefers-reduced-motion: reduce) { .status, .status.flash { transition: none; animation: none; } }
+
+/* ---- tactical treatment ---- */
+.status { border-bottom: 2px solid var(--rule-strong); border-left: 8px solid var(--rule-strong); }
+.status[data-tone="ok"] { border-left-color: var(--pass); } .status[data-tone="warn"] { border-left-color: var(--warn); } .status[data-tone="bad"] { border-left-color: var(--fail); }
+.status h1 { text-transform: uppercase; letter-spacing: 0.04em; font-weight: 700; }
+.status .mark { border-radius: 0; transform: rotate(45deg); width: 0.95rem; height: 0.95rem; }
+#mapWrap { background: var(--surface); background-image: radial-gradient(circle at 1px 1px, #1a212a 1px, transparent 0); background-size: 24px 24px; }
+aside { background: var(--ground); border-left: 2px solid var(--rule-strong); }
+aside section { border-bottom: 1px solid var(--rule); border-left: 3px solid var(--rule-strong); padding-left: 0.9rem; margin: 0.9rem 0; background: var(--panel); padding-right: 0.9rem; }
+aside h2 { text-transform: uppercase; letter-spacing: 0.08em; font-size: var(--step-0); }
+aside h2 .n { background: var(--accent); color: #fff; min-width: 1.4rem; text-align: center; padding: 0 0.3rem; }
+.hint { font-size: var(--step--1); }
+
+/* buttons: primary = solid blue, quiet = outlined, danger = red; the framed one is what to press now */
+button { background: var(--accent); border: 1px solid var(--accent); color: #fff; border-radius: 2px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; font-size: var(--step--1); min-height: 2.6rem; }
+button.quiet { background: transparent; color: var(--ink); border-color: var(--rule-strong); }
+button.quiet:hover:not(:disabled) { background: #1f2630; border-color: var(--mute); }
+button.danger { background: transparent; color: var(--fail); border-color: var(--fail); }
+button.danger:hover:not(:disabled) { background: var(--fail-bg); }
+#recStart { background: var(--pass); border-color: var(--pass); color: #04210d; }
+#recStop { background: var(--fail); border-color: var(--fail); color: #fff; }
+#logBtn { background: var(--pass); border-color: var(--pass); color: #04210d; }
+#missBtn { background: transparent; color: var(--warn); border-color: var(--warn); }
+button[data-next] { position: relative; box-shadow: 0 0 0 3px var(--ground), 0 0 0 5px var(--next); }
+button[data-next]::after { content: "NEXT"; position: absolute; top: -0.85rem; right: -0.3rem; background: var(--next); color: #111; font-size: 0.65rem; letter-spacing: 0.1em; padding: 0.1rem 0.4rem; font-weight: 800; }
+input[type=number], input[type=text], select { background: var(--ground); color: var(--ink); border-radius: 2px; border-color: var(--rule-strong); }
+input[type=number]:focus, input[type=text]:focus, select:focus { border-color: var(--accent); }
+label { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.7rem; }
+label.inline { text-transform: none; letter-spacing: 0; font-size: var(--step-0); }
+.stats div { border-top-color: var(--accent); }
+.strip span { height: 0.9rem; background: #232b35; }
+.strip .miss { background: var(--fail); }
+.chip { border-radius: 2px; text-transform: uppercase; letter-spacing: 0.06em; }
+.badge.pass { background: var(--pass-bg); color: var(--pass); border: 1px solid var(--pass); } .badge.fail { background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail); }
+.legend { background: rgb(11 15 20 / .85); border: 1px solid var(--rule); }
+dialog { border: 2px solid var(--accent); border-radius: 2px; background: var(--panel); }
+dialog svg { background: #fff; padding: 0.5rem; }
+.prompt { color: var(--next); }
+.status.flash { animation: flash .9s ease-out; }
+@keyframes flash { from { box-shadow: inset 0 0 0 6px var(--next); } to { box-shadow: inset 0 0 0 6px transparent; } }
+@media (prefers-reduced-motion: no-preference) { button[data-next] { animation: beacon 1.6s ease-in-out infinite; } }
+@keyframes beacon { 50% { box-shadow: 0 0 0 3px var(--ground), 0 0 0 8px rgb(255 211 61 / .45); } }
+#nextHint { background: var(--next); border-color: var(--next); color: #111; }

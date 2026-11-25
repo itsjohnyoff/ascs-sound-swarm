@@ -33,3 +33,17 @@ export function readiness(s: SessionState | null, online: boolean): Readiness {
   if (worst >= 1) return { tone: "warn", headline: `Ready, but timing is loose (${worst.toFixed(1)} ms)`, detail: "Calibrate again for a tighter result before judging." };
   return { tone: "ok", headline: `Ready. ${plural(live.length, "phone")} synced`, detail: `Worst timing error ${worst.toFixed(2)} ms.` };
 }
+
+export type NextAction = "qrBtn" | "calBtn" | "startBtn" | "logBtn" | null;
+
+/** Which button the operator should press next; the dashboard frames it. */
+export function nextAction(s: SessionState | null, online: boolean, phase: "idle" | "chirping" | "listening" | "review"): NextAction {
+  if (!online || !s) return null;
+  if (phase === "review") return "logBtn";
+  if (phase !== "idle") return null;
+  const live = s.phones.filter((p) => p.connected);
+  if (live.length < MIN_PHONES) return "qrBtn";
+  const synced = live.filter((p) => p.sync_state === "synced" || p.sync_state === "drifting");
+  if (synced.length < live.length) return "calBtn";
+  return "startBtn";
+}

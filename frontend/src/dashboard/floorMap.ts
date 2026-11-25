@@ -9,9 +9,9 @@ export interface MapModel {
 }
 type DragTarget = { kind: "phone"; id: string } | { kind: "speaker" } | null;
 
-const INK = "#17252A", MUTE = "#5a6a66", GRID = "#e3e8e4", EDGE = "#17252A";
-const GRADE_COLOR = { pass: "#1e7a4c", warn: "#b7791f", fail: "#c23b22" } as const;
-const CLASS_RGB: Record<string, string> = { drone: "122,63,181", clap: "43,63,217", other: "107,119,115" };
+const INK = "#e8eef5", MUTE = "#8b949e", GRID = "#1c232c", EDGE = "#6e7d8c";
+const GRADE_COLOR = { pass: "#3fb950", warn: "#d29922", fail: "#f85149" } as const;
+const CLASS_RGB: Record<string, string> = { drone: "163,113,247", clap: "47,129,247", other: "139,148,158" };
 
 export class FloorMap {
   private ctx: CanvasRenderingContext2D;
@@ -100,7 +100,7 @@ export class FloorMap {
       const cw = (W * this.scale) / nx, ch = (H * this.scale) / ny;
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const v = values[j * nx + i] ?? 0;
-        ctx.fillStyle = `rgba(43,63,217,${(v * v * 0.55).toFixed(3)})`;
+        ctx.fillStyle = `rgba(255,140,0,${(v * v * 0.7).toFixed(3)})`;
         ctx.fillRect(this.ox + i * cw, this.oy + j * ch, cw + 0.5, ch + 0.5);
       }
     }
@@ -108,7 +108,12 @@ export class FloorMap {
     ctx.strokeStyle = GRID; ctx.lineWidth = 1; ctx.fillStyle = MUTE; ctx.font = "12px system-ui";
     for (let x = 0; x <= W + 1e-6; x++) { ctx.beginPath(); ctx.moveTo(this.px(x), this.py(0)); ctx.lineTo(this.px(x), this.py(H)); ctx.stroke(); ctx.fillText(`${x}`, this.px(x) - 3, this.py(0) - 6); }
     for (let y = 0; y <= H + 1e-6; y++) { ctx.beginPath(); ctx.moveTo(this.px(0), this.py(y)); ctx.lineTo(this.px(W), this.py(y)); ctx.stroke(); ctx.fillText(`${y}`, this.px(0) - 18, this.py(y) + 4); }
-    ctx.strokeStyle = EDGE; ctx.lineWidth = 2; ctx.strokeRect(this.px(0), this.py(0), W * this.scale, H * this.scale);
+    ctx.strokeStyle = EDGE; ctx.lineWidth = 1; ctx.strokeRect(this.px(0), this.py(0), W * this.scale, H * this.scale);
+    ctx.strokeStyle = "#2f81f7"; ctx.lineWidth = 3; const L = 22;
+    for (const [cx, cy, dx, dy] of [[0, 0, 1, 1], [W, 0, -1, 1], [0, H, 1, -1], [W, H, -1, -1]] as const) {
+      const x = this.px(cx), y = this.py(cy);
+      ctx.beginPath(); ctx.moveTo(x + dx * L, y); ctx.lineTo(x, y); ctx.lineTo(x, y + dy * L); ctx.stroke();
+    }
 
     if (m.showHyperbolas && last) this.drawHyperbolas(last);
 
@@ -148,7 +153,7 @@ export class FloorMap {
       const synced = p.sync_state === "synced" || p.sync_state === "drifting";
       const grade = gradeResidual(p.residual_ms, synced);
       ctx.globalAlpha = p.connected ? 1 : 0.35;
-      ctx.strokeStyle = "rgba(23,37,42,0.35)"; ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(232,238,245,0.55)"; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(x, y, 13 + Math.min(1, Math.sqrt(p.rms) * 3) * 16, 0, 7); ctx.stroke();
       ctx.fillStyle = GRADE_COLOR[grade];
       ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.fill();
@@ -170,7 +175,7 @@ export class FloorMap {
         if (!t.inlier) continue;
         const a = byId.get(t.i), b = byId.get(t.j); if (!a || !b) continue;
         const target = (t.tdoa_ms / 1000) * C; // d_i - d_j (sign per contract: tdoa = t_i - t_j)
-        ctx.strokeStyle = `rgba(183,121,31,${0.3 + 0.5 * t.weight})`;
+        ctx.strokeStyle = `rgba(210,153,34,${0.3 + 0.5 * t.weight})`;
         const step = 0.05;
         ctx.beginPath();
         for (let x = 0; x <= m.room.width_m; x += step) for (let y = 0; y <= m.room.height_m; y += step) {

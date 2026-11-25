@@ -5,7 +5,7 @@ import { isBusy, renderCalTable, runCalibration, unlockAudio } from "./calibrati
 import { FloorMap } from "./floorMap";
 import { FpsMeter } from "./fps";
 import { errorM, insideHull, summarize } from "./judge";
-import { readiness } from "./readiness";
+import { nextAction, readiness } from "./readiness";
 import { isCandidate, trialPrompt, type TrialPhase } from "./trialFlow";
 import "./style.css";
 
@@ -58,7 +58,20 @@ function renderStatus() {
   bar.dataset.tone = r.tone;
   $("headline").textContent = r.headline;
   $("detail").textContent = r.detail;
+  markNext();
 }
+function markNext() {
+  const target = nextAction(session, online, phase);
+  document.querySelectorAll("[data-next]").forEach((el) => el.removeAttribute("data-next"));
+  if (target) document.getElementById(target)?.setAttribute("data-next", "");
+  const hint = $<HTMLButtonElement>("nextHint");
+  hint.hidden = !target;
+  if (target) { hint.dataset.target = target; hint.textContent = `Next: ${NEXT_LABEL[target]}`; }
+}
+const NEXT_LABEL = { qrBtn: "show phone QR", calBtn: "calibrate", startBtn: "start trial", logBtn: "log trial" } as const;
+$("nextHint").addEventListener("click", () => {
+  const el = document.getElementById($("nextHint").dataset.target ?? ""); el?.scrollIntoView({ block: "center", behavior: "smooth" }); el?.focus();
+});
 function flashStatus() {
   const bar = $("statusBar"); bar.classList.remove("flash"); void bar.offsetWidth; bar.classList.add("flash");
 }
@@ -227,6 +240,7 @@ function renderTrialPanel() {
     btns.innerHTML = b("logBtn", "Log trial") + b("otherBtn", "Pick another", "quiet") + b("missBtn", "Mark as missed", "quiet");
   }
   if (phase !== "review") $("recent").innerHTML = "";
+  markNext();
 }
 
 $("trialBtns").addEventListener("click", (ev) => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readiness } from "../src/dashboard/readiness";
+import { nextAction, readiness } from "../src/dashboard/readiness";
 import { isCandidate, trialPrompt } from "../src/dashboard/trialFlow";
 import { micError, syncCopy } from "../src/phone/copy";
 import type { Detection, Phone, SessionState } from "../src/shared/types";
@@ -31,6 +31,17 @@ describe("readiness", () => {
     expect(readiness(session([phone(), phone(), phone({ residual_ms: 7 })]), true).tone).toBe("bad");
   });
   it("geometry warning", () => expect(readiness(session([phone(), phone(), phone()], "collinear"), true).headline).toBe("Move the phones apart"));
+});
+
+describe("next action", () => {
+  it("guides the operator in order", () => {
+    expect(nextAction(session([phone()]), true, "idle")).toBe("qrBtn");
+    expect(nextAction(session([phone(), phone(), phone({ sync_state: "unsynced" })]), true, "idle")).toBe("calBtn");
+    expect(nextAction(session([phone(), phone(), phone()]), true, "idle")).toBe("startBtn");
+    expect(nextAction(session([phone(), phone(), phone()]), true, "review")).toBe("logBtn");
+    expect(nextAction(session([phone(), phone(), phone()]), true, "listening")).toBeNull();
+    expect(nextAction(null, true, "idle")).toBeNull();
+  });
 });
 
 describe("trial flow", () => {
