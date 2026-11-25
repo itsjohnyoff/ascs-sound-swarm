@@ -29,6 +29,8 @@ class Swarm:
 
     def stream_until(self, t_true):
         for pid, tp in self.truth["phones"].items():
+            if pid not in self.session.buffers:
+                continue
             pcm, valid = self.rec[f"{pid}_pcm"], self.rec[f"{pid}_valid"]
             while self.pos[pid] + FRAME <= len(pcm) and true_time(tp, tp["start_index"] + self.pos[pid] + FRAME) <= t_true:
                 k = self.pos[pid]
@@ -109,3 +111,43 @@ def test_no_detection_before_calibration():
             await loop.process_once()
         return sent
     assert asyncio.run(go()) == []
+
+
+def test_dropping_reference_phone_rereferences_and_keeps_detecting():
+    async def go():
+        rec = _rec([SimEvent(3.0, 3.0, 2.5, "clap")], 5.0)
+        session = Session()
+        sent = []
+        loop = EventLoop(session, sent.append)
+        swarm = Swarm(session, rec)
+        swarm.stream_until(0.5)
+        armed = session.arm("lfm_single")
+        swarm.stream_until(1.6)
+        cal = await session.solve(armed.calibration_id, "lfm_single", window_s=3.0)
+        assert cal.synced_count == 4
+
+        ref_id = session.sync_engine._v2_fitter.ref_phone_id
+        assert ref_id is not None
+        epoch_before = session.clock_epoch
+
+        # Disconnect the reference phone: remaining 3 phones should re-reference onto a new clock epoch
+        session.disconnect(ref_id)
+        assert session.clock_epoch > epoch_before
+        new_ref = session.sync_engine._v2_fitter.ref_phone_id
+        assert new_ref is not None and new_ref != ref_id
+        assert len(session.synced_phones()) == 3
+        # New reference phone should have 0.0 drift relative to itself
+        assert session.phones[new_ref].drift_ppm == 0.0
+
+        t = 1.6
+        while t < 4.8:
+            t += 0.1
+            swarm.stream_until(t)
+            await loop.process_once()
+        return [m for m in sent if m["type"] == "detection"], ref_id
+
+    dets, ref_id = asyncio.run(go())
+    assert len(dets) == 1
+    assert ref_id not in dets[0]["phones_used"]
+    assert len(dets[0]["phones_used"]) == 3
+    assert math.hypot(dets[0]["x_m"] - 3.0, dets[0]["y_m"] - 2.5) < 0.35

@@ -84,6 +84,24 @@ class PhoneAudioSlice:
     valid_mask: np.ndarray | None = None  # bool per sample; False denotes a zero-filled gap
 
 
+@dataclass(slots=True)
+class ClockModel:
+    """v2: maps a phone's local sample index to the global timeline.
+
+    Global time is the reference phone's clock in seconds:
+        t_global = (alpha + beta * n_local) / ref_sample_rate
+    The reference phone itself has alpha=0, beta=1.
+    """
+
+    phone_id: str
+    ref_phone_id: str
+    alpha: float
+    beta: float
+    n_points: int
+    residual_ms: float
+    drift_ppm: float  # (beta * fs_local / fs_ref - 1) * 1e6, relative to the reference phone
+
+
 def encode_audio_frame(
     samples_f32: np.ndarray,
     seq: int,

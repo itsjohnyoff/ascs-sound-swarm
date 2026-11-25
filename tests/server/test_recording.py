@@ -133,3 +133,20 @@ def test_failed_publish_keeps_capture_for_retry(tmp_path):
         assert client.post("/api/record/stop").status_code == 200
         assert len(load_recording_npz(path).slices["nw"].samples_f32) == 10
         assert set(tmp_path.iterdir()) == {path}
+
+
+def test_record_stop_accepts_optional_name_query_param(tmp_path):
+    with TestClient(create_app(recordings_dir=tmp_path)) as client:
+        assert client.post("/api/record/start").status_code == 200
+        with client.websocket_connect("/ws/phone/nw") as phone:
+            send_hello(phone, "nw")
+            phone.send_bytes(encode_audio_frame(np.full(10, 0.25), 0, 8000, 100))
+            send_hello(phone, "nw")
+
+        assert client.post("/api/record/stop?name=../escape").status_code == 422
+        resp = client.post("/api/record/stop?name=custom-session")
+        assert resp.status_code == 200, resp.text
+        expected = tmp_path / "custom-session.npz"
+        assert expected.exists()
+        assert len(load_recording_npz(expected).slices["nw"].samples_f32) == 10
+        assert set(tmp_path.iterdir()) == {expected}
