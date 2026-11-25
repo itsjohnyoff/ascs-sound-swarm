@@ -95,6 +95,12 @@ def rss_mb(pid: int) -> float | None:
             return c.WorkingSetSize / 2**20 if ok else None
         finally:
             ctypes.windll.kernel32.CloseHandle(handle)
+    if sys.platform == "darwin":
+        try:
+            process = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, check=True)
+            return int(process.stdout.strip()) / 1024
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            return None
     try:
         for line in Path(f"/proc/{pid}/status").read_text().splitlines():
             if line.startswith("VmRSS:"):

@@ -16,6 +16,8 @@ python scripts/start_https.py --mode tunnel   # backup over cloudflared
 
 Phones open `/phone.html`, tap **Join**, read their ID out loud. The dashboard is `/`, the laptop-speaker chirp page is `/chirp.html`, and `/api/health` reports connected/synced phones and active classifier backend.
 
+- **Gate preflight:** `python -m scripts.phone_gate preflight https://localhost:8443 --insecure` prints the join URL, count, actual sample rates and sync state for each connected phone. Add `--require-sync` after calibration, or `--min-phones 2` for Gate 0.
+- **Real-phone sessions:** follow the [gate plan](docs/superpowers/plans/2026-11-25-a1-real-phone-gates.md) for capture names, evidence, mock runs and the release freeze.
 - **LAN TLS trust:** without `mkcert`, phones see a self-signed cert warning once per IP — on iOS Safari tap *Show Details → visit this website*; on Android Chrome tap *Advanced → Proceed*.
 - **Network fallback:** prefer a phone hotspot or travel router so venue Wi-Fi AP isolation cannot block phones from reaching the laptop. Use `--mode tunnel` (`cloudflared`) only if LAN is blocked.
 
@@ -44,8 +46,8 @@ Soak (Gate 3 prep, about 11 min): `python scripts/soak.py --minutes 10 --out soa
 2. `curl -X POST https://<host>:8443/api/record/start -H 'content-type: application/json' -d '{"name":"spike-01"}' -k`
 3. Play 3 chirps 30 s apart from `/chirp.html`, then 5 claps at taped points.
 4. `curl -X POST https://<host>:8443/api/record/stop -k` (or `?name=spike-01`) -> `data/recordings/spike-01.npz`.
-5. Add the clap points to the file's meta if you want TDOA checks (`meta["clap_points"] = [{"x_m":..,"y_m":..}]`), then
-   `python -m analysis.spike data/recordings/spike-01.npz` and paste the table into `analysis/LOG.md`.
+5. Save taped clap points in order as a JSON array of `{"x_m": ..., "y_m": ...}` objects. Run
+   `python -m analysis.spike data/recordings/spike-01.npz --clap-points data/recordings/spike-01-clap-points.json` and log the results in `analysis/LOG.md`.
    Gate 0 passes when every phone's residual is < 1 ms, 0 gaps, clipped < 1%, and `AGC/gate` is `OK`. See `analysis/venue_capture.md` for the full Gate 0 + venue classifier capture protocol.
 
 ## Judged run (Gate 2 & demo)
@@ -61,6 +63,8 @@ Soak (Gate 3 prep, about 11 min): `python scripts/soak.py --minutes 10 --out soa
 
 - **Virtual:** `python scripts/soak.py --minutes 10 --out analysis/soak-10m.md` (MUST pass: no crash, no phone disconnects, memory growth <= 50 MB, every chirp after the first calibrates, detection rate >= 90%).
 - **Real phones:** keep 4 phones connected for 10 minutes with auto-chirp on, record to `data/recordings/<YYYY-MM-DD>-gate3-soak.npz`, check dropped frames (< 1% target) and residuals (< 1 ms) without manual re-sync, and log in `analysis/LOG.md`.
+
+For each live capture, run `python -m scripts.recording_summary data/recordings/<name>.npz` to see loss and continuity per phone. Add `--append-log --date YYYY-MM-DD --what "Gate 3" --result "measured results"` to append a session row. Run `python -m scripts.phone_gate timing data/recordings/<name>.npz` for per-solve calibration and transient broadcast timing. Use a video with the clap and dashboard in the same recording to measure the full clap-to-map interval.
 
 ## Troubleshooting
 

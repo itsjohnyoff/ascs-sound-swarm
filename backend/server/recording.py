@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import numpy as np
 
+from backend.server.audio_buffer import SEQUENCE_MASK
 from shared.protocol import FLAG_CLOCK_JUMP, DecodedAudioFrame, PhoneConfig, RoomConfig
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,12 @@ class _Track:
         self.sample_rate = frame.sample_rate
         self.start_index = self.end_index = frame.sample_index
         self.captured_samples = 0
+        self.received_frames = 0
+        self.dropped_frames = 0
+        self.sample_gaps = 0
+        self.missing_samples = 0
+        self.last_seq: int | None = None
+        self.clock_jump = int(bool(frame.flags & FLAG_CLOCK_JUMP))
         self.pcm_path = root / f"{index}.f32"
         self.valid_path = root / f"{index}.bool"
         self.pcm = self.pcm_path.open("wb")
@@ -35,7 +42,8 @@ class _Track:
 
     def append(self, phone: PhoneConfig, frame: DecodedAudioFrame) -> None:
         # Seeking past EOF leaves a zero-filled hole in both files.
-        if frame.sample_index != self.end_index:
+        gap = frame.sample_index - self.end_index
+        if gap:
             offset = frame.sample_index - self.start_index
             self.pcm.seek(offset * 4)
             self.valid.seek(offset)
@@ -43,6 +51,13 @@ class _Track:
         self.valid.write(b"\x01" * frame.num_samples)
         self.end_index = frame.sample_index + frame.num_samples
         self.captured_samples += frame.num_samples
+        self.received_frames += 1
+        if self.last_seq is not None:
+            distance = (frame.seq - self.last_seq) & SEQUENCE_MASK
+            self.dropped_frames += max(distance - 1, int(gap > 0))
+            self.sample_gaps += int(gap > 0)
+            self.missing_samples += gap
+        self.last_seq = frame.seq
         self.phone = phone
 
     def close(self) -> None:
@@ -60,14 +75,18 @@ class Recording:
         self.path = path
         self.room = room
         self.started_at_s = time.time()
+        self.started_monotonic_s = time.monotonic()
         self.stopped_at_s: float | None = None
         self.saving = False
         self.failed = False
+        self.calibrations: list[dict] = []
+        self.event_timings: list[dict] = []
         path.parent.mkdir(parents=True, exist_ok=True)
         self._staging = TemporaryDirectory(prefix=".capture-", dir=path.parent)
         self._root = Path(self._staging.name)
         self._tracks: dict[str, list[_Track]] = {}
         self._active: dict[str, _Track] = {}
+        self._disconnects: dict[str, int] = {}
         self._next_track = 0
 
     @property
@@ -85,7 +104,7 @@ class Recording:
                 or track.sample_rate != frame.sample_rate
                 or not 0 <= frame.sample_index - track.end_index <= MAX_GAP_S * frame.sample_rate
             ):
-                self.disconnect(pid)
+                self._end_track(pid)
                 track = None
             if track is None:
                 track = _Track(self._root, self._next_track, phone, frame)
@@ -98,15 +117,16 @@ class Recording:
             logger.exception("Could not spool audio for %s", self.path)
 
     def disconnect(self, phone_id: str) -> None:
-        if self.stopped_at_s is not None:
-            return
-        track = self._active.pop(phone_id, None)
-        if track is not None:
+        if self.stopped_at_s is None and phone_id in self._active:
+            self._disconnects[phone_id] = self._disconnects.get(phone_id, 0) + 1
             try:
-                track.close()
+                self._end_track(phone_id)
             except OSError:
                 self.failed = True
                 logger.exception("Could not close audio track for %s", self.path)
+
+    def _end_track(self, phone_id: str) -> None:
+        self._active.pop(phone_id).close()
 
     def _close_tracks(self) -> None:
         error = None
@@ -128,6 +148,7 @@ class Recording:
         arrays: dict[str, np.ndarray] = {}
         phones: dict[str, dict] = {}
         segments: dict[str, list[dict]] = {}
+        frame_stats: dict[str, dict[str, int]] = {}
         try:
             for original_id, tracks in self._tracks.items():
                 pid = quote(original_id, safe="")
@@ -138,6 +159,15 @@ class Recording:
                 arrays[f"{pid}_start_index"] = np.asarray(primary.start_index, dtype=np.uint64)
                 arrays[f"{pid}_fs"] = np.asarray(primary.sample_rate, dtype=np.int32)
                 segments[pid] = []
+                frame_stats[pid] = {
+                    "received_frames": sum(track.received_frames for track in tracks),
+                    "dropped_frames": sum(track.dropped_frames for track in tracks),
+                    "sample_gaps": sum(track.sample_gaps for track in tracks),
+                    "missing_samples": sum(track.missing_samples for track in tracks),
+                    "segments": len(tracks),
+                    "disconnects": self._disconnects.get(original_id, 0),
+                    "clock_jumps": sum(track.clock_jump for track in tracks),
+                }
                 for i, track in enumerate(tracks):
                     if track is primary:
                         pcm_key, mask_key = f"{pid}_pcm", f"{pid}_valid"
@@ -155,6 +185,8 @@ class Recording:
             arrays["meta"] = np.asarray(json.dumps({
                 "room": self.room.model_dump(mode="json"), "phones": phones, "segments": segments,
                 "started_at_s": self.started_at_s, "stopped_at_s": self.stopped_at_s,
+                "frame_stats": frame_stats, "calibrations": self.calibrations,
+                "event_timings": self.event_timings,
             }))
             temporary_archive = self._root / "recording.npz"
             with temporary_archive.open("wb") as output:

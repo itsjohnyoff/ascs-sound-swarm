@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { nextAction, readiness } from "../src/dashboard/readiness";
-import { isCandidate, trialPrompt } from "../src/dashboard/trialFlow";
+import { isCandidate, trialPrompt, waitForTrialChirp } from "../src/dashboard/trialFlow";
 import { micError, syncCopy } from "../src/phone/copy";
 import type { Detection, Phone, SessionState } from "../src/shared/types";
 
@@ -45,11 +45,31 @@ describe("next action", () => {
 });
 
 describe("trial flow", () => {
-  const d = (o: Partial<Detection>) => ({ timestamp_s: 100, update_seq: 0, ...o }) as Detection;
-  it("accepts only new first-emission detections", () => {
-    expect(isCandidate(d({}), 99)).toBe(true);
-    expect(isCandidate(d({}), 101)).toBe(false);
-    expect(isCandidate(d({ update_seq: 2 }), 99)).toBe(false);
+  const d = (o: Partial<Detection> = {}) => ({ timestamp_s: 100, update_seq: 0, ...o }) as Detection;
+  it("accepts only new first-emission detections received while listening, regardless of clock skew", () => {
+    expect(isCandidate(d({ timestamp_s: -3600 }), "listening", true)).toBe(true);
+    expect(isCandidate(d({ timestamp_s: 3600 }), "chirping", true)).toBe(false);
+    expect(isCandidate(d(), "listening", false)).toBe(false);
+    expect(isCandidate(d({ update_seq: 2 }), "listening", true)).toBe(false);
+  });
+  it("requires a successful solve before a chirped trial can start listening", async () => {
+    await expect(waitForTrialChirp(async () => ({ success: false }))).rejects.toThrow("Calibration failed");
+    await expect(waitForTrialChirp(async () => null)).rejects.toThrow("already running");
+    await expect(waitForTrialChirp(async () => { throw new Error("Server unavailable"); })).rejects.toThrow("Server unavailable");
+  });
+  it("waits out the server's suppression window after a successful solve", async () => {
+    vi.useFakeTimers();
+    try {
+      const ready = vi.fn();
+      const listening = waitForTrialChirp(async () => ({ success: true })).then(ready);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(ready).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await listening;
+      expect(ready).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it("prompts", () => {
     expect(trialPrompt("idle", null, 1)).toContain("Set the true position");

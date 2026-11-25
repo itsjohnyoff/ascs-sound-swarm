@@ -106,7 +106,7 @@ class Session:
         )
         self.onset_detector_cls = _discover_class("backend.dsp.pipeline", "OnsetDetector", StubOnsetDetector)
         self.onset_detectors: dict[str, object] = {}
-        self.onsets: dict[str, list[int]] = {}  # local onset sample indices not yet grouped
+        self.onsets: dict[str, list[tuple[int, float]]] = {}  # sample index and estimated onset time
         self.positioned: set[str] = set()  # phones whose position the server owns (CONTRACTS 5)
         self.revision = 0
         self.clock_epoch = 0
@@ -199,6 +199,7 @@ class Session:
         return buffer
 
     def ingest(self, phone_id: str, frame: DecodedAudioFrame) -> bool:
+        received_s = time.monotonic()
         buffer = self.buffers[phone_id]
         rate_changed = frame.sample_rate != buffer.sample_rate
         if rate_changed:
@@ -216,7 +217,13 @@ class Session:
             self.recording.append(phone, frame)
         detector = self.onset_detectors.get(phone_id)
         if detector is not None:
-            self.onsets[phone_id].extend(detector.push(frame.samples_f32, frame.sample_index, frame.sample_rate))
+            end_index = frame.sample_index + frame.num_samples
+            # shortcut: anchor the end of the PCM batch to its server receive time,
+            # use an independent clock or a video capture to measure transport and display latency.
+            self.onsets[phone_id].extend(
+                (n, received_s - (end_index - n) / frame.sample_rate)
+                for n in detector.push(frame.samples_f32, frame.sample_index, frame.sample_rate)
+            )
         return rate_changed or bool(frame.flags & FLAG_CLOCK_JUMP)
 
     def hello_position(self, phone_id: str, fields: dict) -> dict:
@@ -333,6 +340,13 @@ class Session:
                 )
             run.result = result
             self.revision += 1
+            recording = self.recording
+            if recording is not None and recording.stopped_at_s is None:
+                recording.calibrations.append({
+                    "offset_s": time.monotonic() - recording.started_monotonic_s,
+                    "calibration_id": run.calibration_id,
+                    **result.model_dump(mode="json"),
+                })
             return result
         finally:
             self.solving = False

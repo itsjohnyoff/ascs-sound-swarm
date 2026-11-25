@@ -7,7 +7,7 @@ import { FpsMeter } from "./fps";
 import { errorM, insideHull, summarize } from "./judge";
 import { nextAction, readiness } from "./readiness";
 import { phonesToSpread } from "./placement";
-import { isCandidate, trialPrompt, type TrialPhase } from "./trialFlow";
+import { isCandidate, trialPrompt, waitForTrialChirp, type TrialPhase } from "./trialFlow";
 import "./style.css";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -22,7 +22,6 @@ let truth: { x: number; y: number } | null = null;
 let candidate: Detection | null = null;
 let trials: Trial[] = [];
 let phase: TrialPhase = "idle";
-let trialStartedS = 0;
 let judge = false;
 
 const map = new FloorMap($<HTMLCanvasElement>("map"));
@@ -160,25 +159,28 @@ function onDetection(d: Detection) {
   if (isNew) detections.push(d); else detections[i] = d;
   if (detections.length > 40) detections.shift();
   if (isNew) flashStatus(); // visual only: a laptop beep would be heard by the phones
-  if (phase === "listening" && isCandidate(d, trialStartedS)) { candidate = d; phase = "review"; renderTrialPanel(); }
+  if (isCandidate(d, phase, isNew)) { candidate = d; phase = "review"; renderTrialPanel(); }
   else if (phase === "review" && candidate?.event_id === d.event_id) { candidate = d; renderTrialPanel(); }
   renderRecent(); refresh();
 }
 
 // ---- calibration ----------------------------------------------------------------------------
-async function calibrate(mode: "lfm_dual" | "lfm_single") {
-  if (isBusy()) return;
+async function calibrate(mode: "lfm_dual" | "lfm_single"): Promise<CalibrationResult | null> {
+  if (isBusy()) return null;
   $<HTMLButtonElement>("calBtn").disabled = true; say("calMsg", "Playing the chirp…");
   try {
     const r = await runCalibration(mode);
     if (r) showCalibration(r);
-  } catch (e) { say("calMsg", (e as Error).message, true); }
-  finally { $<HTMLButtonElement>("calBtn").disabled = false; }
+    return r;
+  } finally {
+    $<HTMLButtonElement>("calBtn").disabled = false;
+  }
 }
-$("calBtn").addEventListener("click", () => { unlockAudio(); void calibrate("lfm_dual"); });
+const showCalError = (e: Error) => say("calMsg", e.message, true);
+$("calBtn").addEventListener("click", () => { unlockAudio(); void calibrate("lfm_dual").catch(showCalError); });
 // Any click unlocks sound so the repeat chirp and trial chirps can play later without a gesture.
 document.addEventListener("pointerdown", () => unlockAudio());
-setInterval(() => { if ($<HTMLInputElement>("auto").checked && phase === "idle" && !isBusy() && session?.phones.some((p) => p.connected)) void calibrate("lfm_single"); }, 30_000);
+setInterval(() => { if ($<HTMLInputElement>("auto").checked && phase === "idle" && !isBusy() && session?.phones.some((p) => p.connected)) void calibrate("lfm_single").catch(showCalError); }, 30_000);
 
 // ---- room, layout ----------------------------------------------------------------------------
 $("roomBtn").addEventListener("click", () => void guard("layoutMsg", () => api.putRoom({
@@ -269,12 +271,16 @@ $("trialBtns").addEventListener("click", (ev) => {
 async function startTrial() {
   if (!truth) { say("status", "Set the true position first: click the map or type x and y.", true); return; }
   say("status", "");
-  unlockAudio();
-  trialStartedS = Date.now() / 1000;
   if ($<HTMLInputElement>("pre").checked) {
     phase = "chirping"; renderTrialPanel();
-    try { await calibrate("lfm_single"); } catch (e) { say("status", (e as Error).message, true); }
-    trialStartedS = Date.now() / 1000; // chirp detections are suppressed server-side; count only what follows
+    try {
+      unlockAudio();
+      await waitForTrialChirp(() => calibrate("lfm_single"));
+    } catch (e) {
+      say("status", (e as Error).message, true);
+      phase = "idle"; renderTrialPanel();
+      return;
+    }
   }
   phase = "listening"; renderTrialPanel();
 }

@@ -46,14 +46,14 @@
         <div class="stats" id="cards"></div>
         <div class="row"><div><label for="gx">True x</label><input id="gx" type="number" step="0.01"></div><div><label for="gy">True y</label><input id="gy" type="number" step="0.01"></div><div><label for="gc">Sound</label><select id="gc"><option value="clap">Clap</option><option value="drone">Drone</option></select></div></div>
         <p class="note" id="hullNote"></p>
-        <label class="inline" data-setup><input type="checkbox" id="pre" checked> Play a chirp before each trial</label>
+        <label class="inline"><input type="checkbox" id="pre" checked> Play a chirp before each trial</label>
         <p class="prompt" id="prompt"></p>
         <div class="row" id="trialBtns"></div>
         <div id="recent"></div>
         <p class="note" id="status"></p>
         <table id="trials"></table>
-        <div class="row" data-setup style="margin-top:.8rem"><button class="quiet" id="knownBtn">Check a known point</button><span id="knownBadge"></span></div>
-        <div class="row" data-setup style="margin-top:.6rem"><a href="/api/eval/export.csv" download style="flex:1;text-decoration:none"><button class="quiet" style="width:100%">Download CSV</button></a><button id="resetBtn" class="danger">Clear all trials</button></div>
+        <div class="row" style="margin-top:.8rem"><button class="quiet" id="knownBtn">Check a known point</button><span id="knownBadge"></span></div>
+        <div class="row" style="margin-top:.6rem"><a href="/api/eval/export.csv" download style="flex:1;text-decoration:none"><button class="quiet" style="width:100%">Download CSV</button></a><button id="resetBtn" class="danger">Clear all trials</button></div>
       </section>
     </aside>
   </main>

@@ -1,9 +1,13 @@
 """Agent 3 phase 1: spike report on a recording with chirps then claps."""
 
-from analysis.spike import analyze, format_report
-from sim.room import DEFAULT_ROOM, SimEvent, default_phones, save_npz, simulate
+import json
 
 import numpy as np
+import pytest
+
+from analysis import spike
+from analysis.spike import PhoneReport, SpikeReport, analyze, format_report
+from sim.room import DEFAULT_ROOM, SimEvent, default_phones, save_npz, simulate
 
 
 def test_spike_report_on_simulated_session(tmp_path):
@@ -29,6 +33,58 @@ def test_spike_report_on_simulated_session(tmp_path):
     assert all(not p.agc_gated for p in report.phones.values())
     text = format_report(report)
     assert "Gate 0" in text and "p1" in text and "AGC/gate" in text
+    assert "FAIL" in text and "p2: 1 sample-index gap" in text
+
+    report = analyze(path, clap_points=claps[::-1])
+    assert [clap.point for clap in report.claps] == claps[::-1]
+
+    report = analyze(path, clap_points=claps[:2])
+    assert all(clap.point is None for clap in report.claps)
+    assert "Found 3 transient events for 2 taped claps" in format_report(report)
+
+
+def clean_phone(**updates):
+    return PhoneReport(**({"fs": 48000, "gap_count": 0, "chirps": 3, "residual_ms": 0.1,
+                           "drift_ppm": 0.0, "clipped_fraction": 0.005, "fit_chirps": 3} | updates))
+
+
+@pytest.mark.parametrize(("updates", "reason"), [
+    ({"residual_ms": None}, "residual"),
+    ({"residual_ms": 1.0}, "residual"),
+    ({"chirps": 2}, "chirp"),
+    ({"fit_chirps": 2}, "chirp"),
+    ({"clipped_fraction": 0.01}, "clipped"),
+    ({"gap_count": 1}, "sample-index gap"),
+    ({"agc_gated": True, "agc_reason": "noise-gated"}, "noise-gated"),
+    ({"dropped_frames": 1}, "dropped frame"),
+    ({"segments": 2}, "segments"),
+    ({"disconnects": 1}, "disconnect"),
+])
+def test_spike_report_rejects_failed_capture_condition(updates, reason):
+    report = SpikeReport("spike-01.npz", "p1", {"p1": clean_phone(), "p2": clean_phone(**updates)}, [])
+
+    assert any(reason in failure for failure in report.gate_failures)
+    assert "FAIL" in format_report(report)
+
+
+def test_spike_cli_accepts_sidecar_and_uses_gate_exit_status(tmp_path, monkeypatch, capsys):
+    sidecar = tmp_path / "points.json"
+    sidecar.write_text('[{"x_m": 2, "y_m": 3}]', encoding="utf-8")
+    phones = {"p1": clean_phone(), "p2": clean_phone()}
+
+    def analyze_with_sidecar(path, *, clap_points):
+        assert clap_points == [(2.0, 3.0)]
+        return SpikeReport(path, "p1", phones, [])
+
+    monkeypatch.setattr(spike, "analyze", analyze_with_sidecar)
+    monkeypatch.setattr(spike, "_plot", lambda *args: None)
+    args = ["spike-01.npz", "--clap-points", str(sidecar), "--json"]
+    assert spike.main(args) == 0
+    assert json.loads(capsys.readouterr().out)["gate_failures"] == []
+
+    del phones["p2"]
+    assert spike.main(args) == 1
+    assert "2–4 phones" in json.loads(capsys.readouterr().out)["gate_failures"][0]
 
 
 def test_spike_flags_noise_gated_phone(tmp_path):
