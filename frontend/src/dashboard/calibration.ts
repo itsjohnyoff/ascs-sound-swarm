@@ -38,11 +38,19 @@ export async function runCalibration(mode: Mode): Promise<CalibrationResult | nu
   }
 }
 
+const LABEL = { PASS: "Pass", WARN: "Loose", FAIL: "Fail" } as const;
+
+function failReason(error: string | null): string {
+  if (!error) return "";
+  return /not detected/i.test(error) ? "Didn't hear the chirp" : error;
+}
+
 export function renderCalTable(table: HTMLElement, r: CalibrationResult) {
   const rows = Object.entries(r.per_phone).map(([id, p]) => {
     const g = grade(p.residual_ms, p.synced);
     const f = (v: number | null, d: number) => (v == null ? "–" : v.toFixed(d));
-    return `<tr><td>${id}</td><td>${f(p.residual_ms, 2)} ms</td><td>${f(p.drift_ppm, 1)} ppm</td><td>${f(p.chirp_snr_db, 1)} dB</td><td class="${g}">${g}${p.error ? ` (${p.error})` : ""}</td></tr>`;
+    const why = failReason(p.error);
+    return `<tr><td>${id}</td><td>${f(p.residual_ms, 2)} ms</td><td>${f(p.chirp_snr_db, 0)} dB</td><td class="${g.toLowerCase()}">${LABEL[g]}${why ? `<br><small>${why}</small>` : ""}</td></tr>`;
   });
-  table.innerHTML = `<tr><th>Phone</th><th>Resid.</th><th>Drift</th><th>SNR</th><th></th></tr>${rows.join("")}`;
+  table.innerHTML = `<tr><th>Phone</th><th>Timing</th><th>Chirp</th><th>Result</th></tr>${rows.join("")}`;
 }

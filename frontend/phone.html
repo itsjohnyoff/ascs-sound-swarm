@@ -4,31 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ASCS Phone</title>
-<style>
-  :root { color-scheme: dark; }
-  body { margin: 0; font: 16px system-ui, sans-serif; background: #0b0f14; color: #e8eef5;
-         display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 20px; }
-  #phoneId { font-size: 44px; font-weight: 800; letter-spacing: 1px; font-family: ui-monospace, monospace; }
-  button { font-size: 28px; padding: 18px 48px; border-radius: 14px; border: 0; background: #2f81f7; color: #fff; font-weight: 700; }
-  button:disabled { background: #30363d; }
-  .pill { padding: 6px 14px; border-radius: 999px; background: #30363d; font-weight: 600; }
-  .pill.ok { background: #1a7f37; } .pill.warn { background: #9a6700; } .pill.bad { background: #b62324; }
-  #vu { width: min(90vw, 420px); height: 18px; background: #161b22; border-radius: 9px; overflow: hidden; }
-  #vuBar { height: 100%; width: 0; background: #3fb950; transition: width 60ms linear; }
-  #vuBar.clip { background: #f85149; }
-  #log { font: 13px ui-monospace, monospace; color: #8b949e; text-align: center; max-width: 90vw; white-space: pre-wrap; }
-  .badge { background: #9a6700; padding: 4px 10px; border-radius: 8px; font-size: 14px; }
-  [hidden] { display: none !important; }
-</style>
 </head>
 <body>
-  <div id="phoneId">…</div>
-  <button id="join">Join</button>
-  <div class="pill" id="sync">Not joined</div>
-  <div id="vu"><div id="vuBar"></div></div>
-  <div id="info"></div>
-  <div class="badge" id="warn" hidden></div>
-  <div id="log"></div>
+  <header><small>This phone is</small><div id="phoneId">…</div></header>
+  <section class="state" id="state" data-tone="idle" role="status" aria-live="polite">
+    <h1 id="title">Ready to join</h1>
+    <p id="detail">Tap Join, then allow the microphone. Leave the screen on and the phone where it was measured.</p>
+  </section>
+  <main>
+    <button id="join">Join</button>
+    <div id="vuWrap" hidden><div class="meter-label"><span>Microphone level</span><span id="clipNote"></span></div><div class="meter"><div id="vuBar"></div></div></div>
+    <div id="info"></div>
+    <div id="notices"></div>
+  </main>
   <script type="module" src="/src/phone/main.ts"></script>
 </body>
 </html>

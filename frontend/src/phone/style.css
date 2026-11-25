@@ -1,0 +1,25 @@
+:root { --ground:#f2f4f1; --ink:#17252a; --mute:#5a6a66; --rule:#d5dbd6; --pass:#1e7a4c; --warn:#b7791f; --fail:#c23b22; --accent:#2b3fd9;
+  --pass-bg:#e3f1e9; --warn-bg:#f7ecd6; --fail-bg:#f8e1dc; --idle-bg:#e8ece9;
+  --font:"Avenir Next","Segoe UI Variable","Segoe UI",system-ui,sans-serif; }
+* { box-sizing: border-box; }
+body { margin:0; min-height:100dvh; font:1.0625rem/1.45 var(--font); background:var(--ground); color:var(--ink);
+       display:flex; flex-direction:column; font-variant-numeric:tabular-nums; }
+:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+header { padding:1rem 1.25rem; border-bottom:1px solid var(--rule); }
+header small { color:var(--mute); display:block; }
+#phoneId { font-size:2.4rem; font-weight:700; letter-spacing:.02em; line-height:1.1; }
+.state { padding:1.5rem 1.25rem; background:var(--idle-bg); transition:background-color .25s; }
+.state[data-tone="ok"] { background:var(--pass-bg); } .state[data-tone="warn"] { background:var(--warn-bg); } .state[data-tone="bad"] { background:var(--fail-bg); }
+.state h1 { margin:0; font-size:2rem; line-height:1.1; font-weight:650; }
+.state p { margin:.4rem 0 0; color:var(--mute); }
+main { padding:1.25rem; display:flex; flex-direction:column; gap:1rem; }
+button { min-height:3.5rem; border:0; border-radius:4px; background:var(--ink); color:#fff; font:inherit; font-size:1.25rem; font-weight:650; }
+button:disabled { opacity:.45; }
+.meter { height:.75rem; background:var(--rule); } .meter > div { height:100%; width:0; background:var(--pass); transition:width 60ms linear; }
+.meter > div.clip { background:var(--fail); }
+.meter-label { display:flex; justify-content:space-between; color:var(--mute); font-size:.875rem; margin-bottom:.25rem; }
+#info { color:var(--mute); font-size:.9375rem; }
+.notice { background:var(--warn-bg); border-left:4px solid var(--warn); padding:.6rem .8rem; font-size:.9375rem; }
+.notice.bad { background:var(--fail-bg); border-left-color:var(--fail); }
+[hidden] { display:none !important; }
+@media (prefers-reduced-motion: reduce) { .state, .meter > div { transition:none; } }
