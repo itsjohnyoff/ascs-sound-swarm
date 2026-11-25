@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCS Sound Swarm</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b0f14; --panel:#161b22; --line:#30363d; --fg:#e8eef5; --mute:#8b949e;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#2f81f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px system-ui,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; gap:10px; align-items:center; padding:8px 14px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0 auto 0 0; }
+  main { flex:1; display:flex; min-height:0; }
+  #mapWrap { flex:1; position:relative; min-width:0; }
+  canvas { width:100%; height:100%; display:block; }
+  aside { width:380px; overflow:auto; border-left:1px solid var(--line); padding:10px; display:flex; flex-direction:column; gap:10px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; }
+  h2 { font-size:13px; margin:0 0 8px; color:var(--mute); text-transform:uppercase; letter-spacing:.06em; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:7px 12px; font-weight:600; cursor:pointer; }
+  button.sec { background:#30363d; } button.bad { background:#b62324; } button:disabled { opacity:.5; cursor:default; }
+  input, select { background:#0d1117; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 7px; width:100%; }
+  label { display:block; font-size:12px; color:var(--mute); }
+  .row { display:flex; gap:8px; align-items:flex-end; } .row > * { flex:1; }
+  table { width:100%; border-collapse:collapse; font-size:12px; } td,th { padding:3px 4px; text-align:left; border-bottom:1px solid var(--line); }
+  .PASS { color:var(--ok); } .WARN { color:var(--warn); } .FAIL { color:var(--bad); }
+  #gdop { background:#5a3b00; color:#ffd8a8; padding:8px 14px; display:none; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:6px; font-weight:700; font-size:12px; }
+  .DRONE { background:#8957e5; } .CLAP { background:#1f6feb; } .OTHER { background:#6e7681; }
+  .cards { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; } .card { background:#0d1117; border-radius:6px; padding:6px; text-align:center; }
+  .card b { display:block; font-size:20px; }
+  dialog { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:10px; }
+  dialog svg { width:280px; height:280px; background:#fff; }
+  body.judge aside .hide-judge, body.judge header .hide-judge { display:none; }
+  body.judge aside { width:460px; font-size:17px; } body.judge .card b { font-size:30px; }
+  #status { color:var(--mute); font-size:12px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>ASCS Sound Swarm <span id="status"></span></h1>
+    <label class="hide-judge" style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="heat" style="width:auto"> heatmap</label>
+    <label class="hide-judge" style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="hyp" style="width:auto"> hyperbolas</label>
+    <button class="sec hide-judge" id="qrBtn">Phone QR</button>
+    <button class="sec" id="judgeBtn">Judge mode</button>
+  </header>
+  <div id="gdop"></div>
+  <main>
+    <div id="mapWrap"><canvas id="map"></canvas></div>
+    <aside>
+      <section class="hide-judge"><h2>Calibration</h2>
+        <div class="row"><button id="calBtn">Calibrate</button>
+          <label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="auto" checked style="width:auto"> auto-chirp 30 s</label></div>
+        <div id="calMsg" style="margin:6px 0;color:var(--mute)"></div>
+        <table id="calTable"></table></section>
+      <section class="hide-judge"><h2>Room</h2>
+        <div class="row"><div><label>Width m</label><input id="rw" type="number" step="0.01"></div><div><label>Height m</label><input id="rh" type="number" step="0.01"></div><div><label>Temp °C</label><input id="rt" type="number" step="0.1"></div></div>
+        <div class="row" style="margin-top:6px"><div><label>Speaker x</label><input id="sx" type="number" step="0.01"></div><div><label>Speaker y</label><input id="sy" type="number" step="0.01"></div><button id="roomBtn" class="sec">Apply</button></div></section>
+      <section class="hide-judge"><h2>Phones (exact position)</h2><div id="phones"></div></section>
+      <section class="hide-judge"><h2>Gate 0 recorder</h2>
+        <div class="row"><div><label>Name</label><input id="recName" value="spike-01"></div><button id="recStart">Record</button><button id="recStop" class="bad" disabled>Stop</button></div>
+        <div id="recMsg" style="margin-top:6px;color:var(--mute)"></div></section>
+      <section id="judge"><h2>Judge console</h2>
+        <div class="row"><div><label>Ground truth x</label><input id="gx" type="number" step="0.01"></div><div><label>y</label><input id="gy" type="number" step="0.01"></div>
+          <div><label>Expected</label><select id="gc"><option>clap</option><option>drone</option></select></div></div>
+        <label style="display:flex;gap:4px;align-items:center;margin:6px 0"><input type="checkbox" id="pre" checked style="width:auto"> play chirp before trial</label>
+        <div id="recent"></div>
+        <div class="row" style="margin-top:6px"><button id="missBtn" class="sec">Missed</button><button id="knownBtn" class="sec">Known-point check</button><span id="knownBadge"></span></div>
+        <div class="cards" id="cards" style="margin-top:8px"></div>
+        <table id="trials" style="margin-top:8px"></table>
+        <div class="row hide-judge" style="margin-top:8px"><a href="/api/eval/export.csv" download><button class="sec" style="width:100%">Export CSV</button></a><button id="resetBtn" class="bad">Reset</button></div></section>
+    </aside>
+  </main>
+  <dialog id="qr"><div id="qrBody"></div><p id="qrUrl"></p><form method="dialog"><button>Close</button></form></dialog>
+  <script type="module" src="/src/dashboard/main.ts"></script>
+</body>
+</html>
