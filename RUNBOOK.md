@@ -26,6 +26,8 @@ python -m sim.benchmark --seed 0 [--occlude p2]                            # off
 
 The virtual scenario plays chirps at t = 1 s and 11 s. Arm/solve around them (or keep auto-chirp on in the dashboard) or they show up as detections at the speaker.
 
+Soak (Gate 3 prep, about 11 min): `python scripts/soak.py --minutes 10 --out soak.md`. It starts its own server on port 8765, streams 4 virtual phones with a chirp every 30 s (arm/solve like auto-chirp) and two claps/drones in between, then prints memory growth, dropped frames, per-chirp residual, detection rate, error and latency. Exit code 1 if a MUST fails. Add `--speed 4` for a quick check (memory and latency numbers are then not meaningful).
+
 ## Room setup
 
 1. Phones near the corners, judge points inside their hull, never collinear (the GDOP banner warns).

@@ -51,11 +51,23 @@ async def _phone(url: str, rec: dict, pid: str, t_origin: float, speed: float, c
         await ws.send(json.dumps({"type": "phone_hello", "phone_id": pid, "label": pid, "x_m": p["x_m"],
                                   "y_m": p["y_m"], "sample_rate": int(rec[f"{pid}_fs"]),
                                   "device_info": "virtual phone"}))
-        for frame in frames_for(rec, pid):
-            delay = t_origin + frame.at_s / speed - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            await ws.send(frame.payload)
+        # Read (and drop) phone_status pushes like a real phone page. Unread, they fill the client's
+        # receive queue after 16 calibrations, websockets stops reading the socket, pongs are lost,
+        # and the keepalive closes every phone with 1011 about 20 s later.
+        drain = asyncio.create_task(_drain(ws))
+        try:
+            for frame in frames_for(rec, pid):
+                delay = t_origin + frame.at_s / speed - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await ws.send(frame.payload)
+        finally:
+            drain.cancel()
+
+
+async def _drain(ws) -> None:
+    async for _ in ws:
+        pass
 
 
 async def stream(url: str, rec: dict, speed: float = 1.0, insecure: bool = True) -> None:
