@@ -142,7 +142,7 @@ class OnsetDetector:
         hop_s: float = 0.005,
         snr_db_threshold: float = 10.0,
         refractory_s: float = 0.15,
-        min_rms: float = 0.004,
+        min_rms: float = 0.0012,
     ) -> None:
         self.hop_s = hop_s
         self.snr_db_threshold = snr_db_threshold
@@ -205,8 +205,13 @@ class OnsetDetector:
                 if self._last_onset_idx is None or (hop_abs_idx - self._last_onset_idx) >= refractory_n:
                     self._last_onset_idx = hop_abs_idx
                     onsets.append(hop_abs_idx)
-            else:
-                self._floor = 0.95 * self._floor + 0.05 * max(rms, 1e-5)
+            elif snr_db <= self.snr_db_threshold:
+                # Never poison the background floor on frames that already exceed the SNR gate;
+                # decay quickly on quieter frames and cap any upward creep during weak signal tails.
+                if rms <= self._floor:
+                    self._floor = 0.95 * self._floor + 0.05 * max(rms, 1e-5)
+                else:
+                    self._floor = min(0.015, 0.99 * self._floor + 0.01 * min(rms, 2.0 * self._floor))
 
         rem_start = n_hops * hop
         self._tail = buf[rem_start:].copy()

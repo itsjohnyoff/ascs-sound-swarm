@@ -128,6 +128,8 @@ class AcousticLocalizer2D:
         fs: int,
         event_id: str,
         timestamp_s: float,
+        prior_xy: tuple[float, float] | None = None,
+        prior_sigma_m: float = 1.4,
     ) -> LocalizationResult | None:
         pids = [pid for pid in event.frames[0].keys() if pid in phones]
         if len(pids) < 2:
@@ -143,11 +145,25 @@ class AcousticLocalizer2D:
         pair_taus: list[float] = []
         pair_weights: list[float] = []
 
+        # Downweight loose/drifting phones (> 0.5 ms calibration residual) when >= 3 tight phones exist.
+        tight_count = sum(
+            1 for pid in grid.pids
+            if phones[pid].residual_ms is None or phones[pid].residual_ms <= 0.5
+        )
+        phone_trust: list[float] = []
+        for pid in grid.pids:
+            res_ms = phones[pid].residual_ms
+            if tight_count >= 3 and res_ms is not None and res_ms > 0.5:
+                phone_trust.append(1.0 / (1.0 + ((res_ms - 0.5) / 0.5) ** 2))
+            else:
+                phone_trust.append(1.0)
+
         # Stage 1: Frame-averaged GCC-PHAT-beta -> vectorized 2D SRP-PHAT map
         interp_f = 2 if len(event.frames[0][pids[0]]) >= 8000 else 4
         for p_idx, (i, j) in enumerate(grid.pairs):
             pi, pj = grid.pids[i], grid.pids[j]
             max_tau = float(grid.pair_max_tau[p_idx])
+            pair_trust = min(phone_trust[i], phone_trust[j])
 
             acc_corr: np.ndarray | None = None
             lags_ref: np.ndarray | None = None
@@ -178,11 +194,11 @@ class AcousticLocalizer2D:
             if acc_corr is None or lags_ref is None:
                 lags_ref = np.array([-max_tau, max_tau], dtype=np.float64)
                 acc_corr = np.zeros(2, dtype=np.float64)
-                w_avg = 0.05
+                w_avg = 0.05 * pair_trust
                 tau_global = 0.0
             else:
                 acc_corr /= float(len(event.frames))
-                w_avg = float(np.mean(weights)) if weights else 0.05
+                w_avg = (float(np.mean(weights)) if weights else 0.05) * pair_trust
                 k_best = int(np.argmax(acc_corr))
                 tau_global = float(lags_ref[k_best])
 
@@ -195,7 +211,12 @@ class AcousticLocalizer2D:
             # Stage-1 grid lookup so narrow PHAT impulses never fall between 0.15 m grid nodes.
             srp_map += w_avg * _srp_pair_contribution(acc_corr, lags_ref, grid.tau_grid[p_idx])
 
-        iy0, ix0 = np.unravel_index(int(np.argmax(srp_map)), srp_map.shape)
+        srp_search = srp_map
+        if prior_xy is not None and prior_sigma_m > 0.0:
+            dist2 = (grid.grid_x[None, :] - prior_xy[0]) ** 2 + (grid.grid_y[:, None] - prior_xy[1]) ** 2
+            srp_search = srp_map * (1.0 + 0.35 * np.exp(-dist2 / (2.0 * prior_sigma_m * prior_sigma_m)))
+
+        iy0, ix0 = np.unravel_index(int(np.argmax(srp_search)), srp_search.shape)
         x0 = float(grid.grid_x[ix0])
         y0 = float(grid.grid_y[iy0])
 

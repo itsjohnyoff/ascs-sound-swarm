@@ -177,3 +177,80 @@ def test_dropping_reference_phone_rereferences_and_keeps_detecting():
     assert ref_id not in dets[0]["phones_used"]
     assert len(dets[0]["phones_used"]) == 3
     assert math.hypot(dets[0]["x_m"] - 3.0, dets[0]["y_m"] - 2.5) < 0.35
+
+
+def test_long_drone_beyond_live_slice_keeps_single_event_id_and_tracks_past_seq_6():
+    # Buffer/slice window is 4.0 s; a 5.5 s sustained drone must keep tracking past seq 6 on the same event_id.
+    rec = _rec([SimEvent(3.0, 5.0, 3.5, "drone", duration_s=5.5)], 9.5)
+    _, dets = _run(rec, 9.2)
+    assert dets, "no detection"
+    assert {d["event_id"] for d in dets} == {dets[0]["event_id"]}
+    assert [d["update_seq"] for d in dets] == list(range(len(dets)))
+    assert dets[-1]["update_seq"] >= 7
+    assert all(d["kind"] == "sustained" for d in dets)
+    assert math.hypot(dets[-1]["x_m"] - 5.0, dets[-1]["y_m"] - 3.5) < 0.3
+
+
+def test_onset_detector_quiet_mic_floor_not_poisoned():
+    from backend.dsp.pipeline import OnsetDetector
+
+    fs = 48000
+    det = OnsetDetector()
+    # 2 s quiet background at 0.0001 RMS -> floor ~0.0001 (no false onsets)
+    rng = np.random.default_rng(11)
+    quiet = (rng.normal(0.0, 0.0001, size=2 * fs)).astype(np.float32)
+    for k in range(0, len(quiet), FRAME):
+        assert det.push(quiet[k:k + FRAME], k, fs) == []
+    # 12 s continuous signal dipping around rms ~0.0018 (> 10 dB above 0.0001 floor) must not poison _floor
+    sig = (rng.normal(0.0, 0.0018, size=12 * fs)).astype(np.float32)
+    onsets = []
+    for k in range(0, len(sig), FRAME):
+        onsets.extend(det.push(sig[k:k + FRAME], 2 * fs + k, fs))
+    assert det._floor is not None and det._floor < 0.0005
+    assert len(onsets) >= 20
+
+
+def test_sustained_drone_keeps_sticky_label_on_fadeout_frame():
+    from shared.protocol import ClassificationResult
+
+    class _FadeOutClassifier:
+        backend_name = "stub"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def classify_swarm(self, aligned, fs: int = 48000) -> ClassificationResult:
+            self.calls += 1
+            if self.calls <= 3:
+                return ClassificationResult(
+                    sound_class="drone", is_drone=True, confidence=0.92,
+                    probs={"drone": 0.92, "clap": 0.01, "other": 0.07}, backend_name="stub",
+                )
+            return ClassificationResult(
+                sound_class="other", is_drone=False, confidence=0.88,
+                probs={"drone": 0.08, "clap": 0.04, "other": 0.88}, backend_name="stub",
+            )
+
+    async def go():
+        rec = _rec([SimEvent(3.0, 5.0, 3.5, "drone", duration_s=1.5)], 5.5)
+        session = Session(classifier=_FadeOutClassifier())
+        sent = []
+        loop = EventLoop(session, sent.append)
+        swarm = Swarm(session, rec)
+        swarm.stream_until(0.5)
+        armed = session.arm("lfm_single")
+        swarm.stream_until(1.6)
+        cal = await session.solve(armed.calibration_id, "lfm_single", window_s=3.0)
+        assert cal.synced_count == 4
+        t = 1.6
+        while t < 5.3:
+            t += 0.1
+            swarm.stream_until(t)
+            await loop.process_once()
+        return [m for m in sent if m["type"] == "detection"]
+
+    dets = asyncio.run(go())
+    assert len(dets) >= 4
+    assert all(d["sound_class"] == "drone" and d["is_drone"] is True for d in dets)
+    # Trailing fade-out frames preserve the last confident drone position instead of jumping.
+    assert (dets[-1]["x_m"], dets[-1]["y_m"]) == (dets[2]["x_m"], dets[2]["y_m"])

@@ -729,3 +729,51 @@ def test_detect_all_chirps_skips_louder_clipped_clap_and_finds_all_chirps() -> N
     arr, _ = detect_chirp_arrivals(sub, fs=fs, mode="lfm_single")
     assert len(arr) == 1
     assert abs((arr[0] / fs + 13.0) - 16.0) < 0.0005
+
+
+def test_clock_fitter_recovers_from_outlier_and_step_slip_chirps() -> None:
+    from backend.dsp.clock import EmissionRecord, PhoneObservation, ReferenceClockFitter
+
+    fs = 48000
+    rates = {"p_ref": fs, "p_bad": fs}
+
+    # Case 1: 1 glitched outlier chirp mixed with 3 clean chirps -> LOO drops outlier (< 0.1 ms)
+    fitter = ReferenceClockFitter()
+    times_s = [0.0, 10.0, 20.0, 30.0]
+    emissions = []
+    for k, ts in enumerate(times_s):
+        idx_ref = 1000.0 + ts * fs
+        slip = 0.0035 * fs if k == 1 else 0.0  # 3.5 ms outlier on chirp 1
+        idx_bad = 5000.0 + ts * fs * (1.0 + 25e-6) + slip
+        emissions.append(
+            EmissionRecord(
+                emission_id=k,
+                obs_by_phone={
+                    "p_ref": PhoneObservation(idx_ref, idx_ref, fs, 60.0, 0.9),
+                    "p_bad": PhoneObservation(idx_bad, idx_bad, fs, 60.0, 0.9),
+                },
+            )
+        )
+    fitter.ingest_emissions(emissions, rates)
+    ck = fitter.clock("p_bad")
+    assert ck is not None and ck.residual_ms < 0.2
+
+    # Case 2: buffer slip between old chirps (0, 1) and new chirps (2, 3) -> suffix recovery (< 0.1 ms)
+    fitter2 = ReferenceClockFitter()
+    emissions2 = []
+    for k, ts in enumerate(times_s):
+        idx_ref = 1000.0 + ts * fs
+        step_offset = 0.0040 * fs if k >= 2 else 0.0  # 4 ms post-slip shift
+        idx_bad = 5000.0 + ts * fs + step_offset
+        emissions2.append(
+            EmissionRecord(
+                emission_id=k,
+                obs_by_phone={
+                    "p_ref": PhoneObservation(idx_ref, idx_ref, fs, 60.0, 0.9),
+                    "p_bad": PhoneObservation(idx_bad, idx_bad, fs, 60.0, 0.9),
+                },
+            )
+        )
+    fitter2.ingest_emissions(emissions2, rates)
+    ck2 = fitter2.clock("p_bad")
+    assert ck2 is not None and ck2.residual_ms < 0.2

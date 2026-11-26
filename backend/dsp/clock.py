@@ -238,6 +238,34 @@ def pair_arrivals_to_emissions(
     return [EmissionRecord(emission_id=start_emission_id + idx, obs_by_phone=grp) for idx, grp in enumerate(groups)]
 
 
+def _ols_clock_fit(
+    m_i: np.ndarray,
+    m_ref: np.ndarray,
+    fs_i: int,
+    fs_ref: int,
+) -> tuple[float, float, float, float, np.ndarray]:
+    """Return (alpha, beta, drift_ppm, residual_ms, errs_samples) for >= 2 paired chirp points."""
+    span_s = float(np.max(m_ref) - np.min(m_ref)) / float(fs_ref)
+    if span_s > 0.5:
+        mi_mean = float(np.mean(m_i))
+        mr_mean = float(np.mean(m_ref))
+        dm = m_i - mi_mean
+        denom = float(np.dot(dm, dm))
+        beta = float(np.dot(dm, m_ref - mr_mean) / denom) if denom > 0.0 else (float(fs_ref) / float(fs_i))
+        drift_ppm = (beta * float(fs_i) / float(fs_ref) - 1.0) * 1e6
+        if abs(drift_ppm) > 500.0:
+            beta = float(fs_ref) / float(fs_i)
+            drift_ppm = 0.0
+        alpha = float(mr_mean - beta * mi_mean)
+    else:
+        beta = float(fs_ref) / float(fs_i)
+        alpha = float(m_ref[-1] - beta * m_i[-1])
+        drift_ppm = 0.0
+    errs = (alpha + beta * m_i) - m_ref
+    residual_ms = float(np.sqrt(np.mean(errs ** 2)) / float(fs_ref) * 1000.0)
+    return alpha, beta, drift_ppm, residual_ms, errs
+
+
 class ReferenceClockFitter:
     """Maintains reference-phone global clock and per-phone OLS linear fits."""
 
@@ -509,25 +537,27 @@ class ReferenceClockFitter:
                 drift_ppm = 0.0
                 residual_ms = 0.0
             else:
-                span_s = float(np.max(m_ref) - np.min(m_ref)) / float(fs_ref)
-                if span_s > 0.5:
-                    mi_mean = float(np.mean(m_i))
-                    mr_mean = float(np.mean(m_ref))
-                    dm = m_i - mi_mean
-                    denom = float(np.dot(dm, dm))
-                    beta = float(np.dot(dm, m_ref - mr_mean) / denom) if denom > 0.0 else (float(fs_ref) / float(fs_i))
-                    drift_ppm = (beta * float(fs_i) / float(fs_ref) - 1.0) * 1e6
-                    if abs(drift_ppm) > 500.0:
-                        beta = float(fs_ref) / float(fs_i)
-                        drift_ppm = 0.0
-                    alpha = float(mr_mean - beta * mi_mean)
-                else:
-                    beta = float(fs_ref) / float(fs_i)
-                    alpha = float(m_ref[-1] - beta * m_i[-1])
-                    drift_ppm = 0.0
-
-                errs_samples = (alpha + beta * m_i) - m_ref
-                residual_ms = float(np.sqrt(np.mean(errs_samples ** 2)) / float(fs_ref) * 1000.0)
+                alpha, beta, drift_ppm, residual_ms, errs_samples = _ols_clock_fit(m_i, m_ref, fs_i, fs_ref)
+                # Guard against a single outlier chirp or pre-slip history poisoning the OLS line.
+                if n_pts >= 3 and residual_ms > 0.6:
+                    candidates: list[tuple[float, float, float, float]] = []
+                    worst_idx = int(np.argmax(np.abs(errs_samples)))
+                    loo_mask = np.arange(n_pts) != worst_idx
+                    if float(np.max(m_ref[loo_mask]) - np.min(m_ref[loo_mask])) / float(fs_ref) > 0.5:
+                        ca, cb, cd, cr, _ = _ols_clock_fit(m_i[loo_mask], m_ref[loo_mask], fs_i, fs_ref)
+                        candidates.append((ca, cb, cd, cr))
+                    for k in range(n_pts - 1, 1, -1):
+                        sub_i, sub_ref = m_i[-k:], m_ref[-k:]
+                        if float(np.max(sub_ref) - np.min(sub_ref)) / float(fs_ref) <= 0.5:
+                            continue
+                        ca, cb, cd, cr, _ = _ols_clock_fit(sub_i, sub_ref, fs_i, fs_ref)
+                        if cr <= 0.4:
+                            candidates.append((ca, cb, cd, cr))
+                            break
+                    if candidates:
+                        best = min(candidates, key=lambda c: c[3])
+                        if best[3] < 0.4 and best[3] < 0.4 * residual_ms:
+                            alpha, beta, drift_ppm, residual_ms = best
 
             new_models[pid] = ClockModel(
                 phone_id=pid,

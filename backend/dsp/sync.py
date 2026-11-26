@@ -705,6 +705,11 @@ class SyncEngine:
             model.cal_points.clear()
         self._v2_fitter.invalidate_phone(phone_id)
 
+    def clear_history(self) -> None:
+        """Reset accumulated chirp history before a fresh manual dual/hybrid calibration."""
+        self._v2_fitter = ReferenceClockFitter(max_age_s=self._v2_fitter.max_age_s)
+        self._models.clear()
+
     def sample_to_global_time(self, phone_id: str, sample_index: float) -> float:
         t_glob = self.to_global(phone_id, sample_index)
         if t_glob is None:

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from backend.dsp.tracker import MovingTracker2D
 from shared.protocol import (
     CHIRP_DURATION_S,
     CHIRP_SUPPRESS_S,
@@ -34,8 +35,8 @@ from shared.protocol import (
 TARGET_FS = 48000
 SUSTAIN_CHECK_S = 0.25        # energy still high this long after onset -> sustained
 SUSTAIN_THRESHOLD_DB = 10.0
-SUSTAIN_REEMIT_S = 0.5
-SUSTAIN_MAX_UPDATES = 20      # shortcut: cap drone re-emits at ~10 s, raise if judges play longer
+SUSTAIN_REEMIT_S = 0.25
+SUSTAIN_MAX_UPDATES = 240     # track sustained sources up to ~60 s on a single event_id
 FRAME = 2048
 
 
@@ -100,14 +101,24 @@ def _rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(x, dtype=np.float64)))) if len(x) else 0.0
 
 
-def decide_kind(engine, slices: dict[str, PhoneAudioSlice], t0: float, fs: int = TARGET_FS) -> EventKind | None:
+def decide_kind(
+    engine,
+    slices: dict[str, PhoneAudioSlice],
+    t0: float,
+    fs: int = TARGET_FS,
+    floor_rms: dict[str, float] | None = None,
+) -> EventKind | None:
     """Transient unless energy 250 ms after onset is still > 10 dB above the pre-onset floor."""
     aligned = engine.extract_aligned_window(slices, t0 - 0.12, t0 + SUSTAIN_CHECK_S + 0.05, target_fs=fs)
     if not aligned:
         return None
     ratios = []
-    for x in aligned.values():
+    for pid, x in aligned.items():
         noise = _rms(x[: int(0.1 * fs)])
+        if floor_rms is not None:
+            fb = floor_rms.get(pid)
+            if fb is not None and fb > 0.0:
+                noise = min(noise, fb)
         late = _rms(x[int((0.12 + SUSTAIN_CHECK_S) * fs):])
         ratios.append(20 * math.log10(max(late, 1e-9) / max(noise, 1e-9)))
     return "sustained" if float(np.median(ratios)) > SUSTAIN_THRESHOLD_DB else "transient"
@@ -122,17 +133,33 @@ def event_window(t0: float, kind: EventKind, update_seq: int = 0) -> tuple[float
 
 def extract_event(engine, slices: dict[str, PhoneAudioSlice], t0: float, kind: EventKind, update_seq: int = 0,
                   fs: int = TARGET_FS, min_phones: int = 3) -> dict[str, np.ndarray]:
-    """Aligned window per phone. Gap phones are dropped; clipped phones too while >= min_phones remain."""
+    """Aligned window per phone. Gap phones are dropped; severely clipped phones too while >= min_phones remain."""
     lo, hi = event_window(t0, kind, update_seq)
     aligned = engine.extract_aligned_window(slices, lo, hi, target_fs=fs)  # already drops gap phones
-    clean = {pid: x for pid, x in aligned.items() if float(np.max(np.abs(x), initial=0.0)) < 0.99}
+    clean = {
+        pid: x for pid, x in aligned.items()
+        if len(x) == 0 or float(np.mean(np.abs(x) >= 0.99)) < 0.01
+    }
     return clean if len(clean) >= min_phones else aligned
 
 
-def still_sustained(engine, slices, t0: float, update_seq: int, fs: int = TARGET_FS) -> bool:
-    lo, hi = event_window(t0, "sustained", update_seq)
-    pre = engine.extract_aligned_window(slices, t0 - 0.12, t0 - 0.02, target_fs=fs)
+def still_sustained(
+    engine,
+    slices,
+    t0: float,
+    update_seq: int,
+    fs: int = TARGET_FS,
+    pre_rms: dict[str, float] | None = None,
+) -> bool:
+    _, hi = event_window(t0, "sustained", update_seq)
     cur = engine.extract_aligned_window(slices, hi - 0.25, hi, target_fs=fs)
+    if pre_rms:
+        common = set(pre_rms) & set(cur)
+        if not common:
+            return False
+        ratios = [20 * math.log10(max(_rms(cur[p]), 1e-9) / max(pre_rms[p], 1e-9)) for p in common]
+        return float(np.median(ratios)) > SUSTAIN_THRESHOLD_DB
+    pre = engine.extract_aligned_window(slices, t0 - 0.12, t0 - 0.02, target_fs=fs)
     common = set(pre) & set(cur)
     if not common:
         return False
@@ -143,7 +170,7 @@ def still_sustained(engine, slices, t0: float, update_seq: int, fs: int = TARGET
 def sustained_hold_until(t0: float, last_seq: int) -> float:
     # shortcut: a new sound within 0.5 s after a drone's last window is ignored; split
     # by onset energy if judges play claps over drones.
-    return event_window(t0, "sustained", last_seq)[1] + SUSTAIN_REEMIT_S
+    return event_window(t0, "sustained", last_seq)[1] + max(SUSTAIN_REEMIT_S, 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -174,10 +201,9 @@ def find_events_offline(slices: dict[str, PhoneAudioSlice], phones: dict[str, Ph
                         *, engine=None, localizer=None, classifier=None, min_phones: int = 3
                         ) -> list[OfflineDetection]:
     from backend.dsp.pipeline import LocalizationPipeline, OnsetDetector, SyncEngine
-    from backend.server.session import _discover
-    from backend.server.stubs import StubSoundClassifier
+    from backend.server.session import _discover_classifier
 
-    classifier = classifier or _discover("backend.classifier.model", "SoundClassifier", StubSoundClassifier)
+    classifier = classifier or _discover_classifier()
 
     if engine is None:
         engine = SyncEngine()
@@ -248,6 +274,13 @@ class _Sustained:
     t0: float
     phones_used: set[str]
     seq: int = 0
+    pre_rms: dict[str, float] = field(default_factory=dict)
+    ema_xy: tuple[float, float] | None = None
+    tracker: MovingTracker2D | None = None
+    drone_votes: int = 0
+    total_votes: int = 0
+    drone_conf: float = 0.0
+    drone_probs: dict[str, float] | None = None
 
 
 class EventLoop:
@@ -326,22 +359,60 @@ class EventLoop:
 
         slices = {pid: s.buffers[pid].get_recent_slice(LIVE_SLICE_S) for pid in synced if pid in s.buffers}
         room, phones = s.room, dict(synced)
+        floor_rms = {
+            pid: float(det._floor)
+            for pid, det in s.onset_detectors.items()
+            if getattr(det, "_floor", None) is not None
+        }
+        sus_pre_rms = dict(self._sustained.pre_rms) if self._sustained is not None else {}
+        prior_hint = (
+            self._sustained.tracker.peek_prediction(SUSTAIN_REEMIT_S, room)
+            if (self._sustained is not None and self._sustained.tracker is not None)
+            else None
+        )
+
+        def snapshot_pre_rms(sub: dict[str, PhoneAudioSlice], t0_s: float) -> dict[str, float]:
+            pre_win = engine.extract_aligned_window(sub, t0_s - 0.12, t0_s - 0.02, target_fs=TARGET_FS)
+            out_pre: dict[str, float] = {}
+            for pid in set(sub) | set(floor_rms):
+                vals: list[float] = []
+                if pid in pre_win and len(pre_win[pid]):
+                    vals.append(_rms(pre_win[pid]))
+                fb = floor_rms.get(pid)
+                if fb is not None and fb > 0.0:
+                    vals.append(fb)
+                if vals:
+                    out_pre[pid] = min(vals)
+            return out_pre
 
         def analyze(event_id, t0, kind, seq, pids):
             sub = {p: slices[p] for p in pids if p in slices}
-            if kind == "sustained" and seq > 0 and not still_sustained(engine, sub, t0, seq):
+            if kind == "sustained" and seq > 0 and not still_sustained(engine, sub, t0, seq, pre_rms=sus_pre_rms):
                 return event_id, t0, kind, seq, None
             if kind is None:
-                kind = decide_kind(engine, sub, t0)
+                kind = decide_kind(engine, sub, t0, floor_rms=floor_rms)
                 if kind is None:
                     return event_id, t0, kind, seq, None
                 if kind == "sustained":  # need the full 0.75 s: re-queue as a sustained job
-                    return event_id, t0, kind, -1, None
+                    return event_id, t0, kind, -1, snapshot_pre_rms(sub, t0)
             aligned = extract_event(engine, sub, t0, kind, seq, min_phones=self.min_phones)
             if len(aligned) < self.min_phones:
                 return event_id, t0, kind, seq, None
             used = {p: phones[p] for p in aligned}
-            result = s.localizer.localize(aligned, used, room, kind, fs=TARGET_FS)
+            aligned_loc = aligned
+            if kind == "sustained" and seq > 0:
+                n_loc = int(round(0.45 * TARGET_FS))
+                aligned_loc = {p: (arr[-n_loc:] if len(arr) > n_loc else arr) for p, arr in aligned.items()}
+            if kind == "sustained" and seq > 0 and prior_hint is not None:
+                try:
+                    result = s.localizer.localize(
+                        aligned_loc, used, room, kind, fs=TARGET_FS,
+                        prior_xy=(prior_hint[0], prior_hint[1]), prior_sigma_m=prior_hint[2],
+                    )
+                except TypeError:
+                    result = s.localizer.localize(aligned_loc, used, room, kind, fs=TARGET_FS)
+            else:
+                result = s.localizer.localize(aligned_loc, used, room, kind, fs=TARGET_FS)
             if result is None:
                 return event_id, t0, kind, seq, None
             cls = s.classifier.classify_swarm(aligned, fs=TARGET_FS)
@@ -352,21 +423,90 @@ class EventLoop:
             })
 
         for job in jobs:
-            event_id, t0, kind, seq, result = await asyncio.to_thread(analyze, *job[:5])
+            event_id, t0, kind, seq, payload_or_result = await asyncio.to_thread(analyze, *job[:5])
             if s.clock_epoch != self._epoch:  # recalibrated meanwhile: drop stale results
                 return
             if kind == "sustained":
                 if seq == -1:  # decided sustained, emit seq 0 once 0.75 s is buffered
-                    self._sustained = _Sustained(event_id, t0, set(job[4]), seq=-1)
+                    self._sustained = _Sustained(
+                        event_id, t0, set(job[4]), seq=-1,
+                        pre_rms=payload_or_result if isinstance(payload_or_result, dict) else {},
+                    )
                     self.grouper.hold(sustained_hold_until(t0, 0))
                     continue
+                result = payload_or_result
                 if result is None:
                     self._sustained = None
                     continue
-                self._sustained = _Sustained(event_id, t0, set(result.phones_used), seq)
+                prev_sus = self._sustained
+                total_votes = (prev_sus.total_votes if prev_sus is not None else 0) + 1
+                drone_votes = (prev_sus.drone_votes if prev_sus is not None else 0) + (
+                    1 if result.sound_class == "drone" else 0
+                )
+                drone_conf = (
+                    result.class_confidence
+                    if result.sound_class == "drone"
+                    else (prev_sus.drone_conf if prev_sus is not None else 0.0)
+                )
+                drone_probs = (
+                    result.class_probs
+                    if result.sound_class == "drone"
+                    else (prev_sus.drone_probs if prev_sus is not None else None)
+                )
+                is_sticky_drone = (
+                    result.sound_class != "drone"
+                    and drone_votes >= 2
+                    and drone_votes * 2 >= total_votes
+                )
+                if seq == 0 or prev_sus is None or prev_sus.tracker is None:
+                    tracker = MovingTracker2D(result.x_m, result.y_m)
+                    ema_xy = tracker.position()
+                elif is_sticky_drone:
+                    # Keep the settled drone position rather than drifting on fade-out/handling noise.
+                    tracker = prev_sus.tracker
+                    ema_xy = tracker.position()
+                    result = result.model_copy(
+                        update={"x_m": round(ema_xy[0], 4), "y_m": round(ema_xy[1], 4)}
+                    )
+                else:
+                    tracker = prev_sus.tracker
+                    n_in = sum(1 for pt in result.pair_tdoas_ms if pt.inlier)
+                    fx, fy, _ = tracker.step(
+                        SUSTAIN_REEMIT_S,
+                        result.x_m,
+                        result.y_m,
+                        residual_ms=result.residual_ms,
+                        confidence=result.confidence,
+                        n_inliers=n_in,
+                        n_pairs=len(result.pair_tdoas_ms),
+                        room=room,
+                    )
+                    ema_xy = (fx, fy)
+                    result = result.model_copy(update={"x_m": round(fx, 4), "y_m": round(fy, 4)})
+                if is_sticky_drone:
+                    result = result.model_copy(
+                        update={
+                            "sound_class": "drone",
+                            "is_drone": True,
+                            "class_confidence": drone_conf,
+                            "class_probs": drone_probs or result.class_probs,
+                        }
+                    )
+                self._sustained = _Sustained(
+                    event_id, t0, set(result.phones_used), seq,
+                    pre_rms=prev_sus.pre_rms if prev_sus is not None else sus_pre_rms,
+                    ema_xy=ema_xy,
+                    tracker=tracker,
+                    drone_votes=drone_votes,
+                    total_votes=total_votes,
+                    drone_conf=drone_conf,
+                    drone_probs=drone_probs,
+                )
                 self.grouper.hold(sustained_hold_until(t0, seq))
                 if seq + 1 >= SUSTAIN_MAX_UPDATES:
                     self._sustained = None
+            else:
+                result = payload_or_result
             if result is not None:
                 s.record_detection(result)
                 payload = {"type": "detection", **result.model_dump(mode="json")}

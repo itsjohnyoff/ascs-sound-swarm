@@ -186,3 +186,60 @@ def test_two_phone_diagnostic_mode_and_silence() -> None:
     assert res is not None
     assert res.heatmap is not None and len(res.heatmap.values) == 32 * 24
     assert len(res.pair_tdoas_ms) == 1
+
+
+def test_loose_drifting_phone_is_downweighted_when_three_tight_phones_exist() -> None:
+    room, phones = _make_room_and_phones()
+    for pid in ("p1", "p2", "p3"):
+        phones[pid] = phones[pid].model_copy(update={"residual_ms": 0.15})
+    phones["p4"] = phones["p4"].model_copy(update={"residual_ms": 2.2})
+    pipeline = LocalizationPipeline()
+    fs = 48000
+    clap = _make_clap(fs=fs, seed=77)
+    true_xy = (5.8, 4.1)
+    arr = _simulate_array_event(true_xy, clap, phones, room, fs=fs, snr_db=20.0, echo_amp=0.2, seed=77)
+    # Inject a +2.2 ms clock bias on loose phone p4
+    shift = int(round(0.0022 * fs))
+    arr["p4"] = np.concatenate([np.zeros(shift, dtype=np.float32), arr["p4"][:-shift]])
+    res = pipeline.localize(arr, phones, room, "transient", fs=fs, timestamp_s=10.0)
+    assert res is not None
+    err = math.hypot(res.x_m - true_xy[0], res.y_m - true_xy[1])
+    assert err < 0.25
+
+
+def test_moving_tracker_2d_rejects_outlier_and_tracks_motion() -> None:
+    from backend.dsp.tracker import MovingTracker2D
+
+    room, phones = _make_room_and_phones()
+    tracker = MovingTracker2D(1.5, 2.0)
+
+    # Steady 0.8 m/s motion in +x: inject a 1-frame 3.0 m multipath teleport at step 3
+    for step_idx in range(1, 7):
+        true_x = 1.5 + 0.8 * (step_idx * 0.25)
+        meas_x = true_x + 3.0 if step_idx == 3 else true_x
+        fx, fy, accepted = tracker.step(
+            0.25, meas_x, 2.0, residual_ms=0.25, confidence=0.8, n_inliers=5, n_pairs=6, room=room,
+        )
+        if step_idx == 3:
+            assert accepted is False
+            assert abs(fx - true_x) < 0.35
+        else:
+            assert accepted is True
+            assert math.hypot(fx - true_x, fy - 2.0) < 0.35
+
+    # 3 consistent readings at a new jumped location re-lock cleanly
+    new_x, new_y = 6.0, 4.5
+    results = [
+        tracker.step(0.25, new_x, new_y, residual_ms=0.20, confidence=0.85, n_inliers=6, n_pairs=6, room=room)
+        for _ in range(4)
+    ]
+    assert results[-1][2] is True
+
+    # Kinematic SRP prior works cleanly through LocalizationPipeline.localize
+    pipeline = LocalizationPipeline()
+    fs = 48000
+    drone = _make_drone_buzz(fs=fs, duration_s=0.45, seed=19)
+    arr = _simulate_array_event((4.2, 3.1), drone, phones, room, fs=fs, snr_db=20.0, echo_amp=0.2, seed=20)
+    res_prior = pipeline.localize(arr, phones, room, "sustained", fs=fs, prior_xy=(4.1, 3.0), prior_sigma_m=1.4)
+    assert res_prior is not None
+    assert math.hypot(res_prior.x_m - 4.2, res_prior.y_m - 3.1) < 0.25

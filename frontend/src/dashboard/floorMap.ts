@@ -30,6 +30,8 @@ export class FloorMap {
   onMovePhone: (id: string, x: number, y: number) => void = () => {};
   onPick: (x: number, y: number) => void = () => {};
   private dirty = true;
+  private pinPos = new Map<string, { x: number; y: number }>();
+  private lastFrameMs = 0;
   /** Called after each draw with wall time and cost in ms (used by the ?debug=1 fps meter). */
   onDraw: (now: number, costMs: number) => void = () => {};
 
@@ -41,7 +43,13 @@ export class FloorMap {
     canvas.addEventListener("pointercancel", () => { this.drag = null; });
     new ResizeObserver(() => { this.dirty = true; }).observe(canvas);
     const loop = () => {
-      if (this.dirty) { const t0 = performance.now(); this.draw(); this.dirty = false; this.onDraw(t0, performance.now() - t0); }
+      if (this.dirty) {
+        const t0 = performance.now();
+        this.dirty = this.draw(t0);
+        this.onDraw(t0, performance.now() - t0);
+      } else {
+        this.lastFrameMs = 0;
+      }
       requestAnimationFrame(loop);
     };
     requestAnimationFrame(loop);
@@ -93,14 +101,20 @@ export class FloorMap {
   private px(x: number) { return this.ox + x * this.scale; }
   private py(y: number) { return this.oy + y * this.scale; }
 
-  private draw() {
+  private draw(now: number): boolean {
     const c = this.canvas, ctx = this.ctx, m = this.model;
     const dpr = window.devicePixelRatio || 1;
     const w = c.clientWidth, h = c.clientHeight;
     if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
-    if (!m) return;
+    if (!m) return false;
+    const dt = this.lastFrameMs ? Math.min(0.1, (now - this.lastFrameMs) / 1000) : 0;
+    this.lastFrameMs = now;
+    const lerp = dt > 0 ? 1 - Math.exp(-dt * 14) : 1;
+    let animating = false;
+    const activeIds = new Set(m.detections.map((d) => d.event_id));
+    for (const id of this.pinPos.keys()) if (!activeIds.has(id)) this.pinPos.delete(id);
     const pad = 30;
     this.scale = Math.min((w - 2 * pad) / m.room.width_m, (h - 2 * pad) / m.room.height_m);
     this.ox = (w - m.room.width_m * this.scale) / 2; this.oy = (h - m.room.height_m * this.scale) / 2;
@@ -124,17 +138,25 @@ export class FloorMap {
 
     if (m.showHyperbolas && last) this.drawHyperbolas(last);
 
-    // detection trail (last 8) + latest pin with uncertainty and chronological numbering
-    const trail = m.detections.slice(-8);
-    const baseIdx = Math.max(0, m.detections.length - trail.length);
+    // all retained detection pins + latest pin smoothly gliding to updated coordinates
+    const trail = m.detections;
     trail.forEach((d, i) => {
-      const num = detectionNumber(d.event_id, baseIdx + i + 1);
+      const num = detectionNumber(d.event_id, i + 1);
       const isLast = i === trail.length - 1;
-      const age = (i + 1) / trail.length;
       const col = CLASS_RGB[d.sound_class] ?? CLASS_RGB.other!;
-      const x = this.px(d.x_m), y = this.py(d.y_m);
+      let pos = this.pinPos.get(d.event_id);
+      if (!pos) {
+        pos = { x: d.x_m, y: d.y_m };
+        this.pinPos.set(d.event_id, pos);
+      } else {
+        pos.x += (d.x_m - pos.x) * lerp;
+        pos.y += (d.y_m - pos.y) * lerp;
+        if (Math.hypot(d.x_m - pos.x, d.y_m - pos.y) * this.scale > 0.5) animating = true;
+        else { pos.x = d.x_m; pos.y = d.y_m; }
+      }
+      const x = this.px(pos.x), y = this.py(pos.y);
       const r = isLast ? 11 : 8;
-      ctx.fillStyle = `rgba(${col},${(0.38 + 0.6 * age).toFixed(2)})`;
+      ctx.fillStyle = `rgba(${col},${isLast ? "0.98" : "0.72"})`;
       ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
       ctx.fillStyle = "#0b0f14";
       ctx.font = isLast ? "700 11px system-ui" : "600 10px system-ui";
@@ -192,6 +214,7 @@ export class FloorMap {
       ctx.fillText(!p.connected ? "offline" : synced && p.residual_ms != null ? `${p.residual_ms.toFixed(2)} ms` : "not synced", x + 16, y + 11);
       ctx.globalAlpha = 1;
     }
+    return animating;
   }
 
   // Dashed lines with lengths: speaker to each phone, and around the outline of the phones.
