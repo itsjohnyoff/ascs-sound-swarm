@@ -56,6 +56,12 @@ export interface LocateResult {
 export interface LocateArmed {
   locate_id: string; slot_s: number; order: string[]; laptop_slots: number[]; duration_s: number;
 }
+export type LevelVerdict = "ok" | "quiet" | "silent" | "clipping";
+export interface LevelResult {
+  type?: "level_result"; ok: number; total: number;
+  per_phone: Record<string, { verdict: LevelVerdict; snr_db: number | null; peak: number }>;
+}
+export interface PhoneHint { type: "phone_hint"; tone: "ok" | "warn" | "bad" | "idle"; title: string; detail: string }
 export interface PhoneStatus {
   type: "phone_status"; phone_id: string; synced: boolean;
   residual_ms: number | null; drift_ppm: number | null; state: SyncState;

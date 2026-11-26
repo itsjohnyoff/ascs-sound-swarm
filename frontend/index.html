@@ -24,6 +24,11 @@
       <div class="legend"><span><i style="background:var(--pass)"></i>Synced</span><span><i style="background:var(--warn)"></i>Loose</span><span><i style="background:var(--fail)"></i>Not synced</span></div>
     </div>
     <aside>
+      <section data-setup><h2>Get ready</h2>
+        <p class="hint">Put the laptop in the middle of the room and the phones near the corners, volume up. Then press Get ready.</p>
+        <ol class="steps" id="steps"></ol>
+        <div class="row"><button id="readyBtn">Get ready</button></div>
+      </section>
       <section data-setup><h2>Set up the room</h2>
         <p class="hint">Measure from the top-left corner, in meters. Drag phones on the map or type exact values.</p>
         <div class="row"><div><label for="rw">Width</label><input id="rw" type="number" step="0.01"></div><div><label for="rh">Height</label><input id="rh" type="number" step="0.01"></div><div><label for="rt">Temp °C</label><input id="rt" type="number" step="0.1"></div></div>

@@ -34,3 +34,11 @@ button { min-height:3.2rem; border-radius:8px; border:1px solid var(--accent); b
 .meter { height:.55rem; border-radius:3px; background:#252d37; } .meter > div { border-radius:3px; }
 body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 #notices:empty, #info:empty { display:none; }
+
+/* The whole screen takes the state colour so a phone's status is readable from across the room. */
+body { transition: background-color .25s; }
+body[data-tone="ok"] { background: var(--pass-bg); }
+body[data-tone="warn"] { background: var(--warn-bg); }
+body[data-tone="bad"] { background: var(--fail-bg); }
+body[data-tone] .state { background: transparent; }
+@media (prefers-reduced-motion: reduce) { body { transition: none; } }

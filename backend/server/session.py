@@ -116,6 +116,26 @@ class ArmedLocate:
 
 
 MOVED_WARN_M = 0.10
+LEVEL_WINDOW_S = 4.0
+LEVEL_MIN_SNR_DB = 28.0  # sync needs ~20 dB to pass its template check; keep a margin for a noisier room
+
+
+def level_report(samples: np.ndarray, fs: int) -> dict:
+    """How well one phone heard a single laptop chirp: ok, quiet, clipping or silent."""
+    from backend.dsp.sync import detect_all_chirps, is_window_clipped
+
+    arrivals = detect_all_chirps(samples, fs, min_spacing_s=0.5, min_snr_db=6.0, min_ncc=0.1) if len(samples) else []
+    best = max(arrivals, key=lambda a: a.snr_db, default=None)
+    peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
+    if best is None:
+        verdict = "silent"
+    elif is_window_clipped(samples):
+        verdict = "clipping"
+    elif best.snr_db < LEVEL_MIN_SNR_DB:
+        verdict = "quiet"
+    else:
+        verdict = "ok"
+    return {"verdict": verdict, "snr_db": None if best is None else round(best.snr_db, 1), "peak": round(peak, 3)}
 
 
 class Session:
@@ -146,6 +166,7 @@ class Session:
         self.solving = False
         self.locate: ArmedLocate | None = None
         self.located: dict[str, tuple[float, float]] = {}  # last position found by sound, per phone
+        self.level_run: tuple[str, dict[str, int]] | None = None
 
     def log_backends(self) -> None:
         logger.info(
@@ -385,6 +406,30 @@ class Session:
             return result
         finally:
             self.solving = False
+
+    # ---- loudness check ------------------------------------------------------------------------
+    def arm_level(self) -> str:
+        if self.solving:
+            raise CalibrationConflict("Another solve is already running")
+        self.level_run = (uuid4().hex, {pid: b.latest_sample_index for pid, b in self.buffers.items()
+                                        if self.phones.get(pid) and self.phones[pid].connected})
+        return self.level_run[0]
+
+    async def solve_level(self, level_id: str) -> dict:
+        run = self.level_run
+        if run is None or run[0] != level_id:
+            raise LookupError("Unknown level check ID")
+        self.level_run = None
+        slices = {}
+        for pid, start in run[1].items():
+            if pid not in self.buffers:
+                continue
+            audio = self.buffers[pid].get_recent_slice(LEVEL_WINDOW_S)
+            crop = min(len(audio.samples_f32), max(0, start - audio.start_sample_index))
+            slices[pid] = (audio.samples_f32[crop:], audio.sample_rate)
+        per_phone = await asyncio.to_thread(lambda: {pid: level_report(s, fs) for pid, (s, fs) in slices.items()})
+        ok = sum(r["verdict"] == "ok" for r in per_phone.values())
+        return {"type": "level_result", "ok": ok, "total": len(per_phone), "per_phone": per_phone}
 
     # ---- self-localization ------------------------------------------------------------------
     def arm_locate(self, *, apply: bool = True) -> ArmedLocate:

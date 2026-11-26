@@ -1,9 +1,10 @@
 import { api, OFFLINE_MESSAGE, wsUrl } from "../shared/api";
 import { isDebug } from "../shared/debug";
 import type { CalibrationResult, Detection, Phone, SessionState, Trial } from "../shared/types";
-import { isBusy, renderCalTable, runCalibration, unlockAudio } from "./calibration";
+import { isBusy, renderCalTable, runCalibration, runLevelCheck, unlockAudio } from "./calibration";
 import { FloorMap } from "./floorMap";
 import { FpsMeter } from "./fps";
+import { freshSteps, readyButtonLabel, runGetReady, type ReadyDeps, type StepState } from "./getReady";
 import { locateSummary, runLocate } from "./locate";
 import { centred, distances, roomCentre, speakerOffCentre } from "./geometry";
 import { errorM, insideHull, summarize } from "./judge";
@@ -77,7 +78,7 @@ function renderStatus() {
 function markNext() {
   let target: string | null = nextAction(session, online, phase);
   if ((!judge && (target === "startBtn" || target === "logBtn")) ||
-      (judge && (target === "qrBtn" || target === "calBtn"))) target = "judgeBtn";
+      (judge && (target === "qrBtn" || target === "readyBtn"))) target = "judgeBtn";
   const next = target ? document.getElementById(target) : null;
   const hint = $<HTMLButtonElement>("nextHint");
   hint.hidden = !next || next.matches(":disabled");
@@ -88,7 +89,7 @@ function markNext() {
   hint.dataset.target = next.id;
   hint.textContent = `Next: ${next.id === "judgeBtn" && judge ? "return to setup" : NEXT_LABEL[next.id]}`;
 }
-const NEXT_LABEL: Record<string, string> = { qrBtn: "show phone QR", calBtn: "calibrate", judgeBtn: "open judge mode", startBtn: "start trial", logBtn: "log trial" };
+const NEXT_LABEL: Record<string, string> = { qrBtn: "show phone QR", readyBtn: "get ready", judgeBtn: "open judge mode", startBtn: "start trial", logBtn: "log trial" };
 $("nextHint").addEventListener("click", () => {
   const el = document.getElementById($("nextHint").dataset.target ?? "");
   el?.scrollIntoView({ block: "center" });
@@ -197,6 +198,7 @@ function onDetection(d: Detection) {
   if (isNew) detections.push(d); else detections[i] = d;
   if (detections.length > 500) detections.shift();
   if (isNew) flashStatus(); // visual only: a laptop beep would be heard by the phones
+  if (isNew && detectionWaiter) detectionWaiter(d);
   if (isCandidate(d, phase, isNew)) { candidate = d; phase = "review"; renderTrialPanel(); }
   else if (phase === "review" && candidate?.event_id === d.event_id) { candidate = d; renderTrialPanel(); }
   renderRecent(); refresh();
@@ -242,6 +244,56 @@ $("checkMovedBtn").addEventListener("click", () => { unlockAudio(); void locate(
 $("turnLeft").addEventListener("click", () => void guard("locateMsg", () => api.turnLayout(-15)));
 $("turnRight").addEventListener("click", () => void guard("locateMsg", () => api.turnLayout(15)));
 $("mirrorBtn").addEventListener("click", () => void guard("locateMsg", () => api.turnLayout(0, true)));
+
+// ---- get ready -----------------------------------------------------------------------------------
+let steps = freshSteps();
+let readyRunning = false;
+const STATE_WORD: Record<StepState, string> = { todo: "", running: "Working", done: "Done", failed: "Fix" };
+function renderSteps() {
+  $("steps").innerHTML = steps.map((s) => `<li data-state="${s.state}"><span class="step-name">${esc(s.label)}</span>
+    <span class="step-state">${STATE_WORD[s.state]}</span>${s.detail ? `<p>${esc(s.detail)}</p>` : ""}</li>`).join("");
+  const button = $<HTMLButtonElement>("readyBtn");
+  button.textContent = readyRunning ? "Working…" : readyButtonLabel(steps);
+  button.disabled = readyRunning;
+}
+
+/** Resolve with the next new detection, or null after timeoutMs. */
+let detectionWaiter: ((d: Detection) => void) | null = null;
+const nextDetection = (timeoutMs: number) => new Promise<Detection | null>((resolve) => {
+  const timer = setTimeout(() => { detectionWaiter = null; resolve(null); }, timeoutMs);
+  detectionWaiter = (d) => { clearTimeout(timer); detectionWaiter = null; resolve(d); };
+});
+
+const readyDeps: ReadyDeps = {
+  session: () => (online ? session : null),
+  name: phoneName,
+  level: runLevelCheck,
+  locate: () => runLocate(true),
+  calibrate: () => calibrate("lfm_dual"),
+  clapCheck: async (id) => {
+    const target = session?.phones.find((p) => p.phone_id === id);
+    if (!target) return null;
+    steps = steps.map((s) => (s.id === "check" ? { ...s, detail: `Clap once, loudly, right next to ${phoneName(id)}. Its screen says "Clap right next to me".` } : s));
+    renderSteps();
+    await api.hint(id, { tone: "warn", title: "Clap right next to me", detail: "Once, loudly." }).catch(() => {});
+    const d = await nextDetection(20_000);
+    if (!d) return null;
+    const err = Math.hypot(d.x_m - target.x_m, d.y_m - target.y_m);
+    await api.addKnownPoint({ label: "Get ready clap", gt_x_m: target.x_m, gt_y_m: target.y_m, expected_class: "clap", event_id: d.event_id }).catch(() => {});
+    await api.hint(id, err < 0.5 ? { tone: "ok", title: "Got it", detail: "Ready. Don't move this phone." }
+      : { tone: "bad", title: "That landed too far away", detail: "Follow the laptop." }).catch(() => {});
+    return err;
+  },
+};
+$("readyBtn").addEventListener("click", () => {
+  if (readyRunning) return;
+  unlockAudio();
+  readyRunning = true; renderSteps();
+  void runGetReady(readyDeps, steps, (s) => { steps = s; renderSteps(); })
+    .then((s) => { steps = s; })
+    .finally(() => { readyRunning = false; renderSteps(); markNext(); });
+});
+renderSteps();
 
 // ---- room, layout ----------------------------------------------------------------------------
 $("roomBtn").addEventListener("click", () => void guard("layoutMsg", () => api.putRoom(centred({

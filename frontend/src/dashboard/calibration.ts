@@ -1,6 +1,6 @@
 import { api, type Mode } from "../shared/api";
 import { generateChirp, generateDualChirp, playBuffer } from "../shared/chirpSynth";
-import type { CalibrationResult } from "../shared/types";
+import type { CalibrationResult, LevelResult } from "../shared/types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let ctx: AudioContext | null = null;
@@ -45,6 +45,20 @@ export function runCalibration(mode: Mode): Promise<CalibrationResult | null> {
     await sleep(600);
     return await api.solve(armed.calibration_id, mode, mode === "lfm_dual" ? 7 : 4);
   });
+}
+
+/** Play one chirp and ask each phone how well it heard it (before positions or sync exist). */
+export async function runLevelCheck(): Promise<LevelResult> {
+  const r = await exclusive(async () => {
+    const out = await audioOut();
+    const { level_id } = await api.levelArm();
+    await sleep(250);
+    await playBuffer(out, generateChirp(out.sampleRate));
+    await sleep(600);
+    return api.levelSolve(level_id);
+  });
+  if (!r) throw new Error("Another chirp was playing.");
+  return r;
 }
 
 const LABEL = { PASS: "Pass", WARN: "Loose", FAIL: "Fail" } as const;
