@@ -20,7 +20,7 @@ describe("readiness", () => {
   it("unsynced phones prompt calibration", () => {
     const r = readiness(session([phone(), phone(), phone({ sync_state: "unsynced", residual_ms: null })]), true);
     expect(r.headline).toBe("2 of 3 phones synced");
-    expect(r.detail).toContain("Calibrate");
+    expect(r.detail).toContain("Get ready");
   });
   it("ready when all synced under 1 ms", () => {
     const r = readiness(session([phone(), phone(), phone(), phone()]), true);
@@ -36,7 +36,7 @@ describe("readiness", () => {
 describe("next action", () => {
   it("guides the operator in order", () => {
     expect(nextAction(session([phone()]), true, "idle")).toBe("qrBtn");
-    expect(nextAction(session([phone(), phone(), phone({ sync_state: "unsynced" })]), true, "idle")).toBe("calBtn");
+    expect(nextAction(session([phone(), phone(), phone({ sync_state: "unsynced" })]), true, "idle")).toBe("readyBtn");
     expect(nextAction(session([phone(), phone(), phone()]), true, "idle")).toBe("startBtn");
     expect(nextAction(session([phone(), phone(), phone()]), true, "review")).toBe("logBtn");
     expect(nextAction(session([phone(), phone(), phone()]), true, "listening")).toBeNull();
@@ -44,7 +44,7 @@ describe("next action", () => {
   });
   it("waits on poor geometry and suggests recalibration on loose timing", () => {
     expect(nextAction(session([phone(), phone(), phone()], "collinear"), true, "idle")).toBeNull();
-    expect(nextAction(session([phone(), phone(), phone({ residual_ms: 1 })]), true, "idle")).toBe("calBtn");
+    expect(nextAction(session([phone(), phone(), phone({ residual_ms: 1 })]), true, "idle")).toBe("readyBtn");
   });
 });
 

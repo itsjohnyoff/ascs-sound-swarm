@@ -1,4 +1,4 @@
-import type { CalibrationResult, EvalSummary, LocateArmed, LocateResult, Room, SessionState, Trial } from "./types";
+import type { CalibrationResult, EvalSummary, LevelResult, LocateArmed, LocateResult, Room, SessionState, Trial } from "./types";
 
 export const OFFLINE_MESSAGE = "Can't reach the server. Check that it's still running on the laptop.";
 
@@ -34,6 +34,10 @@ export const api = {
       "POST", "/api/calibrate/arm", { mode }),
   solve: (calibration_id: string, mode: Mode, window_s: number) =>
     call<CalibrationResult>("POST", "/api/calibrate/solve", { calibration_id, mode, window_s }),
+  levelArm: () => call<{ level_id: string }>("POST", "/api/level/arm"),
+  levelSolve: (level_id: string) => call<LevelResult>("POST", "/api/level/solve", { level_id }),
+  hint: (id: string, h: { tone: "ok" | "warn" | "bad" | "idle"; title: string; detail?: string }) =>
+    call<void>("POST", `/api/phones/${encodeURIComponent(id)}/hint`, h),
   locateArm: (apply = true) => call<LocateArmed>("POST", "/api/locate/arm", { apply }),
   locateSolve: (locate_id: string) => call<LocateResult>("POST", "/api/locate/solve", { locate_id }),
   turnLayout: (degrees: number, mirror = false) => call<SessionState>("POST", "/api/layout/turn", { degrees, mirror }),

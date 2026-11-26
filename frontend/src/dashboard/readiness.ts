@@ -26,7 +26,7 @@ export function readiness(s: SessionState | null, online: boolean): Readiness {
   const synced = live.filter((p) => p.sync_state === "synced" || p.sync_state === "drifting");
   if (synced.length < live.length) {
     const lost = live.length - synced.length;
-    return { tone: "warn", headline: `${synced.length} of ${live.length} phones synced`, detail: `${plural(lost, "phone")} need${lost === 1 ? "s" : ""} a chirp. Press Calibrate and keep the room quiet.` };
+    return { tone: "warn", headline: `${synced.length} of ${live.length} phones synced`, detail: `${plural(lost, "phone")} need${lost === 1 ? "s" : ""} a chirp. Press Get ready and keep the room quiet.` };
   }
   const worst = Math.max(...synced.map((p) => p.residual_ms ?? 0));
   if (worst >= 5) return { tone: "bad", headline: `Timing is off by ${worst.toFixed(1)} ms`, detail: "Calibrate again. If it stays high, move the laptop speaker closer to the phones." };
@@ -34,7 +34,7 @@ export function readiness(s: SessionState | null, online: boolean): Readiness {
   return { tone: "ok", headline: `Ready. ${plural(live.length, "phone")} synced`, detail: `Worst timing error ${worst.toFixed(2)} ms.` };
 }
 
-export type NextAction = "qrBtn" | "calBtn" | "startBtn" | "logBtn" | null;
+export type NextAction = "qrBtn" | "readyBtn" | "startBtn" | "logBtn" | null;
 
 /** Which button the operator should press next; the dashboard frames it. */
 export function nextAction(s: SessionState | null, online: boolean, phase: "idle" | "chirping" | "listening" | "review"): NextAction {
@@ -45,6 +45,6 @@ export function nextAction(s: SessionState | null, online: boolean, phase: "idle
   if (live.length < MIN_PHONES) return "qrBtn";
   if (s.gdop_warning) return null;
   const synced = live.filter((p) => p.sync_state === "synced" || p.sync_state === "drifting");
-  if (synced.length < live.length || synced.some((p) => (p.residual_ms ?? 0) >= 1)) return "calBtn";
+  if (synced.length < live.length || synced.some((p) => (p.residual_ms ?? 0) >= 1)) return "readyBtn";
   return "startBtn";
 }
