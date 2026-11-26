@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Iterable
 from copy import deepcopy
@@ -63,6 +64,14 @@ def _discover_class(module: str, name: str, fallback: type) -> type:
 
 def _discover(module: str, name: str, fallback: type):
     return _discover_class(module, name, fallback)()
+
+
+def _discover_classifier():
+    """Prefer the winning heuristic backend unless ASCS_CLASSIFIER_BACKEND=hgb is set."""
+    cls = _discover_class("backend.classifier.model", "SoundClassifier", StubSoundClassifier)
+    if cls is StubSoundClassifier or os.getenv("ASCS_CLASSIFIER_BACKEND") == "hgb":
+        return cls()
+    return cls(model_path=None)
 
 
 class CalibrationConflict(Exception):
@@ -145,9 +154,7 @@ class Session:
         self.localizer = localizer if localizer is not None else _discover(
             "backend.dsp.pipeline", "LocalizationPipeline", StubLocalizationPipeline,
         )
-        self.classifier = classifier if classifier is not None else _discover(
-            "backend.classifier.model", "SoundClassifier", StubSoundClassifier,
-        )
+        self.classifier = classifier if classifier is not None else _discover_classifier()
         self.onset_detector_cls = _discover_class("backend.dsp.pipeline", "OnsetDetector", StubOnsetDetector)
         self.onset_detectors: dict[str, object] = {}
         self.onsets: dict[str, list[tuple[int, float]]] = {}  # sample index and estimated onset time
@@ -363,6 +370,8 @@ class Session:
         # Calibrate a private clock snapshot so a jump or disconnect can invalidate
         # the run without blocking ingestion or letting the worker restore old clocks.
         engine = deepcopy(self.sync_engine)
+        if mode in ("lfm_dual", "ggwave_hybrid") and callable(getattr(engine, "clear_history", None)):
+            engine.clear_history()
         self.solving = True
         try:
             solve = getattr(engine, "add_chirp_observation", None) or engine.calibrate_from_buffers

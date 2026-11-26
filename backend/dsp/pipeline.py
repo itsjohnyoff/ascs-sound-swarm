@@ -16,16 +16,24 @@ from backend.dsp.trigger import AdaptiveEventTrigger, EventWindow, OnsetDetector
 def _filter_clipped_phones(
     windows: dict[str, np.ndarray],
     clip_threshold: float = CLIP_THRESHOLD,
+    phones: dict[str, PhoneConfig] | None = None,
 ) -> dict[str, np.ndarray]:
-    """Drop clipped phones when at least 3 unclipped phones remain for 2D TDOA."""
+    """Drop clipped phones when >= 3 unclipped phones (and >= 3 tightly synced, if known) remain."""
     clean = {
         pid: arr
         for pid, arr in windows.items()
         if not is_window_clipped(arr, clip_threshold=clip_threshold)
     }
     if len(clean) >= 3:
-        return clean
-    # shortcut: retain phones when dropping clipped ones would leave <3 phones for 2D TDOA
+        if phones is None:
+            return clean
+        tight_clean = sum(
+            1 for pid in clean
+            if pid in phones and (phones[pid].residual_ms is None or phones[pid].residual_ms <= 0.5)
+        )
+        if tight_clean >= 3:
+            return clean
+    # shortcut: retain phones when dropping clipped ones would leave <3 clean/tight phones for 2D TDOA
     return windows
 
 
@@ -74,6 +82,8 @@ class LocalizationPipeline:
         kind: Literal["transient", "sustained"],
         fs: int = 48000,
         timestamp_s: float = 0.0,
+        prior_xy: tuple[float, float] | None = None,
+        prior_sigma_m: float = 1.4,
     ) -> LocalizationResult | None:
         """v2 localization entry point for server-selected event windows (no re-triggering)."""
         eligible = {
@@ -89,7 +99,7 @@ class LocalizationPipeline:
             return None
 
         eligible = {pid: arr[:n_samples] for pid, arr in eligible.items()}
-        eligible = _filter_clipped_phones(eligible)
+        eligible = _filter_clipped_phones(eligible, phones=phones)
 
         if kind == "transient":
             frames = [{pid: arr[:n_samples] for pid, arr in eligible.items()}]
@@ -116,6 +126,8 @@ class LocalizationPipeline:
             fs=fs,
             event_id=event_id,
             timestamp_s=timestamp_s,
+            prior_xy=prior_xy,
+            prior_sigma_m=prior_sigma_m,
         )
 
     def detect_and_localize(
@@ -137,7 +149,7 @@ class LocalizationPipeline:
         else:
             n_s = min(len(aligned_audio[pid]) for pid in raw_pids)
             raw_event = {pid: aligned_audio[pid][:n_s] for pid in raw_pids}
-        kept = _filter_clipped_phones(raw_event)
+        kept = _filter_clipped_phones(raw_event, phones=phones)
         if len(kept) < len(raw_event):
             event.frames = [
                 {pid: samples for pid, samples in frame.items() if pid in kept}

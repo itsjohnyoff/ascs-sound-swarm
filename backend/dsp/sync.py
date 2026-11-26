@@ -59,6 +59,36 @@ def _local_template_ncc(
     return float(env[idx]) / local_norm
 
 
+def _precompute_template_halves(tpl: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """Precompute unit-norm analytic templates for first and second chirp frequency halves."""
+    if len(tpl) < 64:
+        return None
+    h = len(tpl) // 2
+    t1 = hilbert(tpl[:h]) / (float(np.linalg.norm(tpl[:h])) + 1e-12)
+    t2 = hilbert(tpl[h:]) / (float(np.linalg.norm(tpl[h:])) + 1e-12)
+    return t1, t2
+
+
+def _split_half_min_ncc(
+    x_filt: np.ndarray,
+    tpl_halves: tuple[np.ndarray, np.ndarray],
+    idx: int,
+) -> float:
+    """Minimum phase-invariant NCC across both chirp halves (rejects impulsive claps)."""
+    t1, t2 = tpl_halves
+    h = len(t1)
+    L = h + len(t2)
+    if idx < 0 or idx + L > len(x_filt):
+        return 0.0
+    seg1 = x_filt[idx : idx + h]
+    seg2 = x_filt[idx + h : idx + L]
+    n1 = float(np.linalg.norm(seg1))
+    n2 = float(np.linalg.norm(seg2))
+    if n1 <= 1e-12 or n2 <= 1e-12:
+        return 0.0
+    return min(abs(complex(np.dot(seg1, t1))) / n1, abs(complex(np.dot(seg2, t2))) / n2)
+
+
 def _valid_envelope_mask(
     valid_mask: np.ndarray | None,
     n_samples: int,
@@ -130,6 +160,7 @@ def _pick_first_arrival_with_ncc(
     min_ncc: float,
     lookback_s: float = 0.025,
     direct_path_ratio: float = 0.55,
+    tpl_halves: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[float | None, float, float]:
     """Locate earliest direct-path peak in env[start:end] matching the chirp template."""
     start = max(0, start)
@@ -145,6 +176,7 @@ def _pick_first_arrival_with_ncc(
     if snr_db < min_snr_db:
         return None, snr_db, 0.0
 
+    half_thresh = 0.5 * min_ncc
     # Search backwards before strongest peak to recover direct path even if a wall echo is louder
     lookback = int(round(lookback_s * fs))
     win_start = max(start, i_max - lookback)
@@ -153,11 +185,11 @@ def _pick_first_arrival_with_ncc(
     for pk in peaks:
         cand = win_start + int(pk)
         ncc = _local_template_ncc(env, x_filt, cand, tpl_len)
-        if ncc >= min_ncc:
+        if ncc >= min_ncc and (tpl_halves is None or _split_half_min_ncc(x_filt, tpl_halves, cand) >= half_thresh):
             return _parabolic_refine(env, cand), snr_db, ncc
 
     ncc_max = _local_template_ncc(env, x_filt, i_max, tpl_len)
-    if ncc_max >= min_ncc:
+    if ncc_max >= min_ncc and (tpl_halves is None or _split_half_min_ncc(x_filt, tpl_halves, i_max) >= half_thresh):
         return _parabolic_refine(env, i_max), snr_db, ncc_max
     return None, snr_db, ncc_max
 
@@ -174,6 +206,7 @@ def _pick_first_arrival(
     min_ncc: float,
     lookback_s: float = 0.025,
     direct_path_ratio: float = 0.55,
+    tpl_halves: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> tuple[float | None, float]:
     idx, snr_db, _ = _pick_first_arrival_with_ncc(
         env=env,
@@ -187,12 +220,14 @@ def _pick_first_arrival(
         min_ncc=min_ncc,
         lookback_s=lookback_s,
         direct_path_ratio=direct_path_ratio,
+        tpl_halves=tpl_halves,
     )
     return idx, snr_db
 
 
 CLIP_THRESHOLD: float = 0.99
 MIN_CLIPPED_SAMPLES: int = 2
+DEFAULT_CHIRP_MIN_NCC: float = 0.15
 
 
 def is_window_clipped(
@@ -214,7 +249,7 @@ def detect_all_chirps(
     valid_mask: np.ndarray | None = None,
     min_spacing_s: float = 1.0,
     min_snr_db: float = 12.0,
-    min_ncc: float = 0.25,
+    min_ncc: float = DEFAULT_CHIRP_MIN_NCC,
     lookback_s: float = 0.025,
     direct_path_ratio: float = 0.55,
     f_low: float = 1200.0,
@@ -231,34 +266,47 @@ def detect_all_chirps(
     )
     if prep is None:
         return []
-    env, x_filt, _, sigma, tpl_len = prep
+    env, x_filt, tpl, sigma, tpl_len = prep
+    tpl_halves = _precompute_template_halves(tpl)
 
-    working_env = env.copy()
+    min_height = sigma * (10.0 ** (min_snr_db / 20.0))
+    cand_dist = max(1, int(round(min(0.05, 0.5 * min_spacing_s) * fs)))
+    cand_pks, _ = find_peaks(env, height=min_height, distance=cand_dist)
+    if len(cand_pks) == 0:
+        return []
+    cand_pks = cand_pks[np.argsort(env[cand_pks])[::-1]]
+
+    lookback_n = int(round(lookback_s * fs))
+    tail_n = max(3, int(round(0.005 * fs)))
     guard = max(1, int(round(min_spacing_s * fs)))
+    accepted_centers: list[int] = []
     arrivals: list[ChirpArrival] = []
 
-    for _ in range(max(1, int(math.ceil(len(samples_f32) / max(1, guard))) + 2)):
+    for pk in cand_pks:
+        pk_i = int(pk)
+        if any(abs(pk_i - prev) < guard for prev in accepted_centers):
+            continue
         idx_rel, snr_db, ncc = _pick_first_arrival_with_ncc(
-            env=working_env,
+            env=env,
             x_filt=x_filt,
             tpl_len=tpl_len,
             fs=fs,
-            start=0,
-            end=len(working_env),
+            start=max(0, pk_i - lookback_n),
+            end=min(len(env), pk_i + tail_n),
             sigma=sigma,
             min_snr_db=min_snr_db,
             min_ncc=min_ncc,
             lookback_s=lookback_s,
             direct_path_ratio=direct_path_ratio,
+            tpl_halves=tpl_halves,
         )
         if idx_rel is None:
-            break
-
+            # Skip loud non-chirp claps/impulses instead of stopping early
+            continue
         i_center = int(round(idx_rel))
-        mask_lo = max(0, i_center - guard)
-        mask_hi = min(len(working_env), i_center + guard + 1)
-        working_env[mask_lo:mask_hi] = 0.0
-
+        if any(abs(i_center - prev) < guard for prev in accepted_centers):
+            continue
+        accepted_centers.append(i_center)
         arrivals.append(
             ChirpArrival(
                 sample_index=float(start_sample_index) + idx_rel,
@@ -278,7 +326,7 @@ def detect_chirp_arrivals(
     mode: CalibrationMode = "lfm_dual",
     gap_s: float = DUAL_CHIRP_GAP_S,
     min_snr_db: float = 12.0,
-    min_ncc: float = 0.25,
+    min_ncc: float = DEFAULT_CHIRP_MIN_NCC,
     valid_mask: np.ndarray | None = None,
     lookback_s: float = 0.025,
     direct_path_ratio: float = 0.55,
@@ -291,12 +339,28 @@ def detect_chirp_arrivals(
     )
     if prep is None:
         return [], -100.0
-    env, x_filt, _, sigma, tpl_len = prep
+    env, x_filt, tpl, sigma, tpl_len = prep
+    tpl_halves = _precompute_template_halves(tpl)
 
-    p_a, snr_a = _pick_first_arrival(
-        env, x_filt, tpl_len, fs, 0, len(env), sigma, min_snr_db, min_ncc,
-        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio,
-    )
+    min_height = sigma * (10.0 ** (min_snr_db / 20.0))
+    lookback_n = int(round(lookback_s * fs))
+    tail_n = max(3, int(round(0.005 * fs)))
+    cand_pks, _ = find_peaks(env, height=min_height, distance=max(1, int(round(0.05 * fs))))
+    p_a: float | None = None
+    snr_a = 20.0 * math.log10(max(float(np.max(env)), 1e-12) / max(sigma, 1e-12)) if len(env) else -100.0
+    if len(cand_pks):
+        cand_pks = cand_pks[np.argsort(env[cand_pks])[::-1]]
+        for pk in cand_pks:
+            pk_i = int(pk)
+            p_cand, snr_cand = _pick_first_arrival(
+                env, x_filt, tpl_len, fs,
+                max(0, pk_i - lookback_n), min(len(env), pk_i + tail_n),
+                sigma, min_snr_db, min_ncc,
+                lookback_s=lookback_s, direct_path_ratio=direct_path_ratio, tpl_halves=tpl_halves,
+            )
+            if p_cand is not None:
+                p_a, snr_a = p_cand, snr_cand
+                break
     if p_a is None:
         return [], snr_a
 
@@ -311,14 +375,14 @@ def detect_chirp_arrivals(
     fwd_e = int(round(p_a)) + gap_n + tol
     p_fwd, snr_fwd = _pick_first_arrival(
         env, x_filt, tpl_len, fs, fwd_s, fwd_e, sigma, partner_min_snr, min_ncc,
-        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio,
+        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio, tpl_halves=tpl_halves,
     )
 
     bwd_s = int(round(p_a)) - gap_n - tol
     bwd_e = int(round(p_a)) - gap_n + tol
     p_bwd, snr_bwd = _pick_first_arrival(
         env, x_filt, tpl_len, fs, bwd_s, bwd_e, sigma, partner_min_snr, min_ncc,
-        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio,
+        lookback_s=lookback_s, direct_path_ratio=direct_path_ratio, tpl_halves=tpl_halves,
     )
 
     candidates: list[tuple[float, float]] = []
@@ -358,11 +422,13 @@ class SyncEngine:
         chirp_direct_path_ratio: float = 0.55,
         chirp_f_low: float = 1200.0,
         chirp_f_high: float = 8500.0,
+        chirp_min_ncc: float = DEFAULT_CHIRP_MIN_NCC,
     ) -> None:
         self.chirp_lookback_s = chirp_lookback_s
         self.chirp_direct_path_ratio = chirp_direct_path_ratio
         self.chirp_f_low = chirp_f_low
         self.chirp_f_high = chirp_f_high
+        self.chirp_min_ncc = chirp_min_ncc
         self._models: dict[str, _ClockModel] = {}
         self._v2_fitter = ReferenceClockFitter()
 
@@ -446,6 +512,7 @@ class SyncEngine:
                     slc.samples_f32,
                     fs=slc.sample_rate,
                     mode=mode,
+                    min_ncc=self.chirp_min_ncc,
                     valid_mask=valid_mask,
                     lookback_s=self.chirp_lookback_s,
                     direct_path_ratio=self.chirp_direct_path_ratio,
@@ -484,6 +551,7 @@ class SyncEngine:
                     fs=slc.sample_rate,
                     start_sample_index=slc.start_sample_index,
                     valid_mask=valid_mask,
+                    min_ncc=self.chirp_min_ncc,
                     lookback_s=self.chirp_lookback_s,
                     direct_path_ratio=self.chirp_direct_path_ratio,
                     f_low=self.chirp_f_low,
@@ -568,7 +636,7 @@ class SyncEngine:
                             for ib in range(ia + 1, len(cal_pids)):
                                 pa, pb = cal_pids[ia], cal_pids[ib]
                                 expected_tdoa = tau_props[pa] - tau_props[pb]
-                                _, _, measured_tdoa, _ = compute_gcc_phat(
+                                lags, corr, measured_tdoa, _ = compute_gcc_phat(
                                     aligned_cal[pa],
                                     aligned_cal[pb],
                                     fs=48000,
@@ -576,6 +644,15 @@ class SyncEngine:
                                     f_min=1200.0,
                                     f_max=8000.0,
                                 )
+                                if abs(measured_tdoa - expected_tdoa) > 0.002 and len(lags) > 0:
+                                    # Prefer direct-path GCC peak near expected TDOA when a room bounce slightly wins
+                                    win_mask = np.abs(lags - expected_tdoa) <= 0.0025
+                                    g_peak = float(np.max(corr))
+                                    if g_peak > 1e-12 and bool(np.any(win_mask)):
+                                        sub_corr = corr[win_mask]
+                                        k_loc = int(np.argmax(sub_corr))
+                                        if float(sub_corr[k_loc]) >= 0.50 * g_peak:
+                                            measured_tdoa = float(lags[win_mask][k_loc])
                                 err_ms = abs(measured_tdoa - expected_tdoa) * 1000.0
                                 pair_errs[pa].append(err_ms)
                                 pair_errs[pb].append(err_ms)
@@ -627,6 +704,11 @@ class SyncEngine:
             model.synced = False
             model.cal_points.clear()
         self._v2_fitter.invalidate_phone(phone_id)
+
+    def clear_history(self) -> None:
+        """Reset accumulated chirp history before a fresh manual dual/hybrid calibration."""
+        self._v2_fitter = ReferenceClockFitter(max_age_s=self._v2_fitter.max_age_s)
+        self._models.clear()
 
     def sample_to_global_time(self, phone_id: str, sample_index: float) -> float:
         t_glob = self.to_global(phone_id, sample_index)
@@ -741,6 +823,7 @@ class SyncEngine:
                 slc.samples_f32,
                 fs=slc.sample_rate,
                 mode=mode,
+                min_ncc=self.chirp_min_ncc,
                 valid_mask=slc.valid_mask,
                 lookback_s=self.chirp_lookback_s,
                 direct_path_ratio=self.chirp_direct_path_ratio,

@@ -185,11 +185,18 @@ function renderCalTableLive() {
 }
 
 // ---- detections ---------------------------------------------------------------------------
+function clearPins() {
+  detections.length = 0;
+  if (phase === "idle") candidate = null;
+  renderRecent();
+  refresh();
+}
+
 function onDetection(d: Detection) {
   const i = detections.findIndex((x) => x.event_id === d.event_id);
   const isNew = i < 0;
   if (isNew) detections.push(d); else detections[i] = d;
-  if (detections.length > 40) detections.shift();
+  if (detections.length > 500) detections.shift();
   if (isNew) flashStatus(); // visual only: a laptop beep would be heard by the phones
   if (isNew && detectionWaiter) detectionWaiter(d);
   if (isCandidate(d, phase, isNew)) { candidate = d; phase = "review"; renderTrialPanel(); }
@@ -294,6 +301,7 @@ $("roomBtn").addEventListener("click", () => void guard("layoutMsg", () => api.p
 }))));
 map.onMovePhone = (id, x, y) => { const p = session?.phones.find((q) => q.phone_id === id); void guard("layoutMsg", () => api.putPhone(id, { label: p?.label, x_m: x, y_m: y })); };
 $("heat").addEventListener("change", refresh); $("hyp").addEventListener("change", refresh); $("dist").addEventListener("change", refresh);
+$("clearPinsBtn").addEventListener("click", clearPins);
 
 $("saveLayout").addEventListener("click", () => {
   if (!session) return;
@@ -345,6 +353,7 @@ recordStart.addEventListener("click", () => void guard("recMsg", async () => {
   const name = recordName.value.trim() || "spike-01";
   try {
     const r = await api.recordStart(name);
+    clearPins();
     say("recMsg", `Recording to ${r.path}. Play your chirps and claps, then stop.`);
     recordName.disabled = true;
     recordStop.disabled = false;
@@ -539,7 +548,7 @@ $("resetBtn").addEventListener("click", () => {
 // ---- boot ----------------------------------------------------------------------------------------
 void api.session().then((s) => { online = true; applySession(s); }).catch(() => { say("status", OFFLINE_MESSAGE, true); renderStatus(); });
 void loadTrials().catch(() => {});
-void fetch("/api/detections/recent?limit=5").then((r) => r.json()).then((j: { detections: Detection[] }) => {
+void fetch("/api/detections/recent?limit=100").then((r) => r.json()).then((j: { detections: Detection[] }) => {
   for (const d of [...j.detections].reverse()) if (!detections.some((x) => x.event_id === d.event_id)) detections.push(d);
   refresh();
 }).catch(() => {});

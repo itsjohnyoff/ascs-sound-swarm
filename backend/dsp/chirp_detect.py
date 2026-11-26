@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from backend.dsp.clock import ChirpArrival
-from backend.dsp.sync import detect_all_chirps
+from backend.dsp.sync import DEFAULT_CHIRP_MIN_NCC, detect_all_chirps
 
 Arrival = ChirpArrival
 
@@ -18,7 +18,7 @@ def detect_chirps(
     valid_mask: np.ndarray | None = None,
     min_spacing_s: float = 1.0,
     min_snr_db: float = 12.0,
-    min_ncc: float = 0.25,
+    min_ncc: float = DEFAULT_CHIRP_MIN_NCC,
     lookback_s: float = 0.025,
     direct_path_ratio: float = 0.55,
     f_low: float = 1200.0,
