@@ -635,3 +635,97 @@ def test_replay_offline_localize_end_to_end(tmp_path: Path) -> None:
     )
     data_default = json.loads(proc_default.stdout)
     assert data_default["events"] == []
+
+
+def test_real_room_low_ncc_reverberant_chirp_syncs_while_claps_rejected() -> None:
+    from backend.dsp.sync import detect_all_chirps
+
+    room = RoomConfig(width_m=5.0, height_m=7.0, temperature_c=22.0, speaker_x_m=2.5, speaker_y_m=3.5)
+    c = speed_of_sound(room.temperature_c)
+    fs = 48000
+    chirp = generate_lfm_chirp(fs)
+    rng = np.random.default_rng(314)
+    n_tot = int(6.0 * fs)
+    t_b = np.arange(int(0.025 * fs)) / fs
+    raw_b = np.exp(-t_b / 0.004) * rng.normal(0.0, 1.0, size=len(t_b))
+    clap = (0.8 * raw_b / (np.max(np.abs(raw_b)) + 1e-12)).astype(np.float32)
+
+    coords = [("p1", 0.3, 6.7), ("p2", 4.7, 0.3), ("p3", 4.8, 6.7), ("p4", 0.3, 0.3)]
+    phones = {pid: PhoneConfig(phone_id=pid, label=pid, x_m=x, y_m=y, sample_rate=fs) for pid, x, y in coords}
+    slices = {}
+
+    for idx, (pid, x, y) in enumerate(coords):
+        sig = rng.normal(0.0, 2e-4, size=n_tot).astype(np.float32)
+        # Loud broadband clap at t=1.2 s must NOT falsely trigger chirp detection even at min_ncc=0.15
+        i_cl = int(1.2 * fs)
+        sig[i_cl : i_cl + len(clap)] += clap
+
+        # Reverberant chirp at t=3.5 s with realistic dense room tail overlapping the 150 ms template,
+        # pushing local NCC into the real-room ~0.18..0.23 range while leaving direct arrival clear.
+        tau_spk = math.hypot(x - room.speaker_x_m, y - room.speaker_y_m) / c
+        t_dir = 3.5 + tau_spk
+        echo_profile = [
+            (1.0, 0.0),
+            (0.65, 0.0042),
+            (1.15 if pid == "p2" else 0.70, 0.0058),
+        ]
+        # Evenly spaced random-sign reverb tail across [8 ms, 148 ms] lowers template NCC into ~0.19..0.22
+        # without random reflection clustering overtaking the direct arrival.
+        rng_rir = np.random.default_rng(1000)
+        for k, dt_late in enumerate(np.linspace(0.008, 0.148, 300)):
+            amp_late = 0.56 * math.exp(-float(dt_late) / 0.16) * float(rng_rir.choice((-1.0, 1.0)))
+            echo_profile.append((amp_late, float(dt_late)))
+        for amp, dt in echo_profile:
+            i_pos = int(round((t_dir + dt) * fs))
+            if i_pos + len(chirp) <= len(sig):
+                sig[i_pos : i_pos + len(chirp)] += np.float32(0.35 * amp) * chirp
+
+        hits = detect_all_chirps(sig, fs=fs)
+        assert len(hits) == 1, f"{pid} expected 1 chirp (clap rejected), got {len(hits)}"
+        assert 0.15 <= hits[0].ncc < 0.25, f"{pid} expected 0.15 <= ncc < 0.25, got {hits[0].ncc:.3f}"
+        assert abs(hits[0].local_offset / fs - t_dir) < 0.0008
+
+        slices[pid] = make_phone_slice(
+            pid, sig, start_sample_index=1000 + idx * 500, sample_rate=fs, valid_mask=np.ones(n_tot, dtype=bool)
+        )
+
+    eng = SyncEngine()
+    cal = eng.add_chirp_observation(slices, phones, room, mode="lfm_single")
+    assert cal.success is True
+    assert cal.synced_count == 4
+    assert cal.max_residual_ms is not None and cal.max_residual_ms < 1.5
+    assert all(r.synced for r in cal.per_phone.values())
+
+
+def test_detect_all_chirps_skips_louder_clipped_clap_and_finds_all_chirps() -> None:
+    from backend.dsp.sync import detect_all_chirps, detect_chirp_arrivals
+
+    fs = 48000
+    chirp = generate_lfm_chirp(fs)
+    rng = np.random.default_rng(909)
+    n_tot = int(35.0 * fs)
+    sig = rng.normal(0.0, 2e-4, size=n_tot).astype(np.float32)
+
+    chirp_starts_s = [1.0, 16.0, 31.0]
+    for ts in chirp_starts_s:
+        pos = int(round(ts * fs))
+        sig[pos : pos + len(chirp)] += np.float32(0.18) * chirp
+
+    # Insert 2 huge near-field clipped claps (stronger raw matched-filter peak than the 0.18x chirps)
+    t_b = np.arange(int(0.020 * fs)) / fs
+    for clap_s in (8.0, 22.0):
+        raw = np.exp(-t_b / 0.003) * rng.normal(0.0, 1.0, size=len(t_b))
+        clap = np.clip(4.0 * raw / (np.max(np.abs(raw)) + 1e-12), -1.0, 1.0).astype(np.float32)
+        pos = int(round(clap_s * fs))
+        sig[pos : pos + len(clap)] = clap
+
+    hits = detect_all_chirps(sig, fs=fs)
+    assert len(hits) == 3, f"Expected 3 real chirps and 0 claps, got {[round(h.local_offset/fs, 3) for h in hits]}"
+    for h, expected_s in zip(hits, chirp_starts_s):
+        assert abs(h.local_offset / fs - expected_s) < 0.0005
+
+    # Live calibration single-chirp window with a louder clap inside must still pick the chirp
+    sub = sig[int(13.0 * fs) : int(24.0 * fs)]
+    arr, _ = detect_chirp_arrivals(sub, fs=fs, mode="lfm_single")
+    assert len(arr) == 1
+    assert abs((arr[0] / fs + 13.0) - 16.0) < 0.0005

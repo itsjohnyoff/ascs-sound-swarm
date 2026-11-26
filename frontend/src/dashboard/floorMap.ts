@@ -14,6 +14,13 @@ const INK = "#dde4ea", MUTE = "#8996a1", GRID = "#1b222a", EDGE = "#5d6b79";
 const GRADE_COLOR = { pass: "#66b07a", warn: "#cba653", fail: "#d4706a" } as const;
 const CLASS_RGB: Record<string, string> = { drone: "165,139,214", clap: "90,143,208", other: "137,150,161" };
 
+export function detectionNumber(eventId: string, fallback: number): number {
+  const m = /(\d+)$/.exec(eventId);
+  if (!m) return fallback;
+  const n = Number.parseInt(m[1]!, 10);
+  return n > 0 ? n : fallback;
+}
+
 export class FloorMap {
   private ctx: CanvasRenderingContext2D;
   private scale = 50; private ox = 0; private oy = 0;
@@ -117,18 +124,38 @@ export class FloorMap {
 
     if (m.showHyperbolas && last) this.drawHyperbolas(last);
 
-    // detection trail (last 8) + latest pin with uncertainty
+    // detection trail (last 8) + latest pin with uncertainty and chronological numbering
     const trail = m.detections.slice(-8);
+    const baseIdx = Math.max(0, m.detections.length - trail.length);
     trail.forEach((d, i) => {
+      const num = detectionNumber(d.event_id, baseIdx + i + 1);
+      const isLast = i === trail.length - 1;
       const age = (i + 1) / trail.length;
       const col = CLASS_RGB[d.sound_class] ?? CLASS_RGB.other!;
-      ctx.fillStyle = `rgba(${col},${(0.15 + 0.6 * age).toFixed(2)})`;
-      ctx.beginPath(); ctx.arc(this.px(d.x_m), this.py(d.y_m), i === trail.length - 1 ? 9 : 5, 0, 7); ctx.fill();
-      if (i === trail.length - 1) {
+      const x = this.px(d.x_m), y = this.py(d.y_m);
+      const r = isLast ? 11 : 8;
+      ctx.fillStyle = `rgba(${col},${(0.38 + 0.6 * age).toFixed(2)})`;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+      ctx.fillStyle = "#0b0f14";
+      ctx.font = isLast ? "700 11px system-ui" : "600 10px system-ui";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(String(num), x, y + 0.5);
+      if (!this.judgeMode) {
+        const tag = `#${num} ${d.sound_class}`;
+        ctx.font = isLast ? "600 12px system-ui" : "11px system-ui";
+        const tw = ctx.measureText(tag).width + 8;
+        ctx.fillStyle = "rgba(18,23,29,0.82)";
+        ctx.fillRect(x + r + 3, y - 8, tw, 16);
+        ctx.fillStyle = isLast ? INK : MUTE;
+        ctx.textAlign = "start";
+        ctx.fillText(tag, x + r + 7, y + 0.5);
+      }
+      if (isLast) {
         ctx.strokeStyle = `rgba(${col},0.9)`; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
-        ctx.beginPath(); ctx.arc(this.px(d.x_m), this.py(d.y_m), Math.max(6, d.uncertainty_m * this.scale), 0, 7); ctx.stroke(); ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(x, y, Math.max(6, d.uncertainty_m * this.scale), 0, 7); ctx.stroke(); ctx.setLineDash([]);
       }
     });
+    ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
 
     if (m.groundTruth) {
       const g = m.groundTruth;
