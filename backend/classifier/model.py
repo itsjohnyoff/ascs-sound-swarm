@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
+from threadpoolctl import threadpool_limits
 
 from backend.classifier.features import Features, extract, vector
 from shared.protocol import ClassificationResult
@@ -68,7 +69,10 @@ class SoundClassifier:
             return [_score(f) for f in feats]  # raw rule scores; normalized after fusion
         names = tuple(self._bundle["features"])
         model = self._bundle["model"]
-        p = model.predict_proba(np.vstack([vector(f, names) for f in feats]))
+        # Scoring 3 rows is ~1 ms of work; letting HGB spin up its OpenMP pool across every
+        # core costs ~30 ms per call (and more under load), so keep prediction on one thread.
+        with threadpool_limits(limits=1, user_api="openmp"):
+            p = model.predict_proba(np.vstack([vector(f, names) for f in feats]))
         return [{k: float(row[list(model.classes_).index(k)]) if k in model.classes_ else 0.0 for k in CLASSES}
                 for row in p]
 
