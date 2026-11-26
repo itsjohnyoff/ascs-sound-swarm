@@ -19,23 +19,32 @@ export function grade(residualMs: number | null | undefined, synced: boolean): "
   return residualMs < 1 ? "PASS" : residualMs < 5 ? "WARN" : "FAIL";
 }
 
-/** arm, 250 ms lead-in, play, 600 ms tail, solve. Serialized: overlapping runs return null. */
-export async function runCalibration(mode: Mode): Promise<CalibrationResult | null> {
+/** Run one sound job at a time (calibration, locating phones). Overlapping calls return null. */
+export async function exclusive<T>(fn: () => Promise<T>): Promise<T | null> {
   if (busy) return null;
   busy = true;
-  try {
+  try { return await fn(); } finally { busy = false; }
+}
+
+/** The running output context, or an error the user can act on. */
+export async function audioOut(): Promise<AudioContext> {
+  unlockAudio();
+  if (ctx!.state !== "running") await ctx!.resume();
+  if (ctx!.state !== "running") throw new Error("Browser blocked sound. Click the page once and try again.");
+  return ctx!;
+}
+
+/** arm, 250 ms lead-in, play, 600 ms tail, solve. Serialized: overlapping runs return null. */
+export function runCalibration(mode: Mode): Promise<CalibrationResult | null> {
+  return exclusive(async () => {
     const armed = await api.arm(mode);
     await sleep(250);
-    unlockAudio();
-    if (ctx!.state !== "running") await ctx!.resume();
-    if (ctx!.state !== "running") throw new Error("Browser blocked sound. Click the page once and try again.");
-    const fs = ctx!.sampleRate;
-    await playBuffer(ctx!, mode === "lfm_dual" ? generateDualChirp(fs) : generateChirp(fs));
+    const out = await audioOut();
+    const fs = out.sampleRate;
+    await playBuffer(out, mode === "lfm_dual" ? generateDualChirp(fs) : generateChirp(fs));
     await sleep(600);
     return await api.solve(armed.calibration_id, mode, mode === "lfm_dual" ? 7 : 4);
-  } finally {
-    busy = false;
-  }
+  });
 }
 
 const LABEL = { PASS: "Pass", WARN: "Loose", FAIL: "Fail" } as const;

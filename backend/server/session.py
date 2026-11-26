@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from backend.dsp import ranging
 from backend.server.audio_buffer import BUFFER_DURATION_S, PhoneRingBuffer
 from backend.server.judge_eval import JudgeEval
 from backend.server.recording import Recording
@@ -34,6 +35,7 @@ from shared.protocol import (
     PhoneSyncReport,
     RoomConfig,
     SyncState,
+    speed_of_sound,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -85,6 +87,28 @@ class ArmedCalibration:
         }
 
 
+@dataclass
+class ArmedLocate:
+    locate_id: str
+    order: list[str]                     # phones in emission order (schedule() of these)
+    armed_monotonic_s: float
+    start_indices: dict[str, int] = field(default_factory=dict)
+    apply: bool = True
+
+    def response(self) -> dict:
+        slots = ranging.schedule(self.order)
+        return {
+            "locate_id": self.locate_id,
+            "slot_s": ranging.SLOT_S,
+            "order": self.order,
+            "laptop_slots": [k for k, who in enumerate(slots) if who == ranging.LAPTOP],
+            "duration_s": len(slots) * ranging.SLOT_S,
+        }
+
+
+MOVED_WARN_M = 0.10
+
+
 class Session:
     """Own live state on the asyncio event loop and pass copies to DSP workers."""
 
@@ -113,6 +137,8 @@ class Session:
         self.calibration_ends: dict[str, int] = {}
         self.calibration: ArmedCalibration | None = None
         self.solving = False
+        self.locate: ArmedLocate | None = None
+        self.located: dict[str, tuple[float, float]] = {}  # last position found by sound, per phone
 
     def log_backends(self) -> None:
         logger.info(
@@ -350,6 +376,95 @@ class Session:
             return result
         finally:
             self.solving = False
+
+    # ---- self-localization ------------------------------------------------------------------
+    def arm_locate(self, *, apply: bool = True) -> ArmedLocate:
+        if self.solving:
+            raise CalibrationConflict("Another solve is already running")
+        order = sorted(pid for pid in self.active_phones() if pid in self.buffers)
+        if len(order) < ranging.MIN_PHONES:
+            raise CalibrationConflict(f"Need at least {ranging.MIN_PHONES} connected phones to locate them")
+        self.locate = ArmedLocate(
+            uuid4().hex, order, time.monotonic(),
+            {pid: self.buffers[pid].latest_sample_index for pid in order}, apply,
+        )
+        return self.locate
+
+    def _clamp(self, x: float, y: float) -> tuple[float, float]:
+        return (min(max(x, 0.0), self.room.width_m), min(max(y, 0.0), self.room.height_m))
+
+    async def solve_locate(self, locate_id: str) -> dict:
+        run = self.locate
+        if run is None or run.locate_id != locate_id:
+            raise LookupError("Unknown locate ID")
+        if self.solving:
+            raise CalibrationConflict("Another solve is already running")
+        n_slots = len(ranging.schedule(run.order))
+        window_s = min(BUFFER_DURATION_S, n_slots * ranging.SLOT_S + 3.0)
+        slices = {}
+        for pid in run.order:
+            if pid not in self.buffers:
+                continue
+            audio = self.buffers[pid].get_recent_slice(window_s)
+            crop = min(len(audio.samples_f32), max(0, run.start_indices.get(pid, 0) - audio.start_sample_index))
+            slices[pid] = (audio.samples_f32[crop:], audio.sample_rate, audio.start_sample_index + crop,
+                           audio.valid_mask[crop:] if audio.valid_mask is not None else None)
+        prior = {pid: (p.x_m, p.y_m) for pid, p in self.phones.items() if pid in slices}
+        speaker = (self.room.speaker_x_m, self.room.speaker_y_m)
+        c = speed_of_sound(self.room.temperature_c)
+
+        def work() -> ranging.LayoutResult:
+            heard = {pid: ranging.heard_from_audio(s, fs, start, n_slots, valid)
+                     for pid, (s, fs, start, valid) in slices.items()}
+            return ranging.solve_layout(heard, run.order, speaker, c, prior=prior)
+
+        self.solving = True
+        try:
+            result = await asyncio.to_thread(work)
+        finally:
+            self.solving = False
+        self.locate = None
+
+        phones_out: dict[str, dict] = {}
+        for pid in run.order:
+            fix = result.phones.get(pid)
+            if fix is None:
+                phones_out[pid] = {"status": "failed", "x_m": None, "y_m": None, "rms_m": None, "moved_m": None}
+                continue
+            x, y = self._clamp(fix.x_m, fix.y_m)
+            before = self.located.get(pid)
+            moved = float(np.hypot(x - before[0], y - before[1])) if before else None
+            phones_out[pid] = {
+                "status": fix.status, "x_m": round(x, 3), "y_m": round(y, 3), "rms_m": round(fix.rms_m, 4),
+                "heard": fix.heard, "heard_by": fix.heard_by,
+                "moved_m": round(moved, 3) if moved is not None else None,
+                "moved": moved is not None and moved > MOVED_WARN_M,
+            }
+            if run.apply and result.success and fix.status != "failed":
+                self.set_phone(pid, x_m=round(x, 3), y_m=round(y, 3))
+                self.positioned.add(pid)
+                self.located[pid] = (x, y)
+        if run.apply and result.success:
+            self.revision += 1
+        return {
+            "type": "locate_result", "success": result.success, "applied": run.apply and result.success,
+            "anchored": result.anchored, "rms_m": None if result.rms_m is None else round(result.rms_m, 4),
+            "error": result.error, "phones": phones_out,
+        }
+
+    def turn_layout(self, degrees: float, mirror: bool) -> None:
+        """Turn (and optionally mirror) the connected phones about the speaker; the sound fits either way."""
+        sx, sy = self.room.speaker_x_m, self.room.speaker_y_m
+        a = np.deg2rad(degrees)
+        for pid, phone in self.active_phones().items():
+            dx, dy = phone.x_m - sx, phone.y_m - sy
+            if mirror:
+                dx = -dx
+            x, y = self._clamp(sx + dx * np.cos(a) - dy * np.sin(a), sy + dx * np.sin(a) + dy * np.cos(a))
+            self.set_phone(pid, x_m=round(float(x), 3), y_m=round(float(y), 3))
+            if pid in self.located:
+                self.located[pid] = (float(x), float(y))
+        self.revision += 1
 
     def record_detection(self, result: LocalizationResult) -> None:
         self.detections.pop(result.event_id, None)
