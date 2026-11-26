@@ -4,6 +4,7 @@ import type { CalibrationResult, Detection, Phone, SessionState, Trial } from ".
 import { isBusy, renderCalTable, runCalibration, unlockAudio } from "./calibration";
 import { FloorMap } from "./floorMap";
 import { FpsMeter } from "./fps";
+import { centred, distances, roomCentre, speakerOffCentre } from "./geometry";
 import { errorM, insideHull, summarize } from "./judge";
 import { nextAction, readiness } from "./readiness";
 import { phonesToSpread } from "./placement";
@@ -39,10 +40,19 @@ if (isDebug()) {
   setInterval(() => { el.textContent = `draw ${meter.fps.toFixed(1)}/s · ${meter.avgCostMs.toFixed(2)} ms avg · ${meter.maxCostMs.toFixed(2)} ms max`; }, 500);
 }
 
+/** Only phones we can hear right now. Offline ones are hidden; the server keeps their position for when they rejoin. */
+const livePhones = (): Phone[] => (online ? session?.phones.filter((p) => p.connected) ?? [] : []);
+function renderDistances() {
+  const rows = session ? distances(livePhones(), session.room) : [];
+  $("distances").innerHTML = rows.length
+    ? rows.map((d) => `<tr><td>${esc(d.a)} to ${esc(d.b)}</td><td>${d.meters.toFixed(2)} m</td></tr>`).join("")
+    : `<tr><td>Shown when phones join.</td></tr>`;
+}
 const refresh = () => {
   if (!session) return;
   map.model = {
-    room: session.room, phones: session.phones, detections,
+    room: session.room, phones: livePhones(), detections,
+    showDistances: $<HTMLInputElement>("dist").checked,
     showHeat: $<HTMLInputElement>("heat").checked, showHyperbolas: $<HTMLInputElement>("hyp").checked,
     groundTruth: truth, linkedEstimate: candidate,
   };
@@ -92,42 +102,41 @@ const spread = new Set<string>();
 function applySession(s: SessionState) {
   session = s;
   // Phones that join on top of each other get their own spot so every dot is visible.
-  for (const m of phonesToSpread(s.phones, s.room, spread)) {
+  for (const m of phonesToSpread(s.phones.filter((p) => p.connected), s.room, spread)) {
     spread.add(m.id);
     const p = s.phones.find((q) => q.phone_id === m.id);
     void api.putPhone(m.id, { label: p?.label, x_m: m.x, y_m: m.y }).catch(() => {});
   }
   if (document.activeElement?.tagName !== "INPUT") fillForms(s);
-  renderPhones(s.phones);
+  // The speaker is always the middle of the room, including after a size change or a server restart.
+  if (speakerOffCentre(s.room)) void guard("layoutMsg", () => api.putRoom(centred(s.room)));
+  renderPhones(); renderDistances(); renderCalTableLive();
   renderStatus(); renderTrials(); refresh();
 }
 
 function fillForms(s: SessionState) {
   const r = s.room;
   const set = (id: string, v: number) => { $<HTMLInputElement>(id).value = String(v); };
-  set("rw", r.width_m); set("rh", r.height_m); set("rt", r.temperature_c); set("sx", r.speaker_x_m); set("sy", r.speaker_y_m);
+  set("rw", r.width_m); set("rh", r.height_m); set("rt", r.temperature_c);
+  const c = roomCentre(r);
+  $("speakerNote").textContent = `Speaker is the centre of the room (${c.x.toFixed(2)}, ${c.y.toFixed(2)}). Put the laptop there.`;
 }
 
 function stateWords(p: Phone): string {
-  if (!p.connected) return "offline";
   return ({ synced: "synced", drifting: "drifting", unsynced: "not synced", clock_jump: "needs re-sync" } as const)[p.sync_state];
 }
 
-function renderPhones(phones: Phone[]) {
+function renderPhones() {
   const box = $("phones");
   if (box.contains(document.activeElement) && document.activeElement?.tagName === "INPUT") return;
+  const phones = livePhones();
   if (!phones.length) { box.innerHTML = `<p class="hint">Phones appear here when they join.</p>`; return; }
   box.innerHTML = phones.map((p) => `<div class="phone-row" data-id="${esc(p.phone_id)}">
-    <small>${esc(p.phone_id)} · ${stateWords(p)}${p.connected ? "" : ` <button class="quiet" data-remove="${esc(p.phone_id)}" style="min-height:1.5rem;padding:0 .5rem;font-size:.75rem">Remove</button>`}</small>
+    <small>${esc(p.phone_id)} · ${stateWords(p)}</small>
     <div><label>Name</label><input data-k="label" value="${esc(p.label)}" placeholder="e.g. North"></div>
     <div><label>x</label><input data-k="x" type="number" step="0.01" value="${p.x_m}"></div>
     <div><label>y</label><input data-k="y" type="number" step="0.01" value="${p.y_m}"></div></div>`).join("");
 }
-
-$("phones").addEventListener("click", (ev) => {
-  const id = (ev.target as HTMLElement).dataset.remove; if (!id) return;
-  api.deletePhone(id).then(() => say("layoutMsg", `Removed ${id}.`)).catch((e: Error) => say("layoutMsg", e.message, true));
-});
 
 $("phones").addEventListener("change", (ev) => {
   const row = (ev.target as HTMLElement).closest<HTMLElement>("[data-id]"); if (!row) return;
@@ -151,7 +160,7 @@ function connect() {
     } else if (m.type === "calibration_result") showCalibration(m as CalibrationResult);
     else if (m.type === "detection") onDetection(m as Detection);
   };
-  socket.onclose = () => { online = false; renderStatus(); setTimeout(connect, Math.min(8000, 500 * 2 ** retry++)); };
+  socket.onclose = () => { online = false; renderStatus(); renderPhones(); renderDistances(); renderCalTableLive(); refresh(); setTimeout(connect, Math.min(8000, 500 * 2 ** retry++)); };
 }
 
 function showCalibration(r: CalibrationResult) {
@@ -159,7 +168,18 @@ function showCalibration(r: CalibrationResult) {
   say("calMsg", r.success
     ? `${r.synced_count} of ${total} phones synced. Worst timing error ${r.max_residual_ms?.toFixed(2) ?? "–"} ms.`
     : "Calibration failed. Check the speaker volume and try again.", !r.success);
-  renderCalTable($<HTMLTableElement>("calTable"), r);
+  lastCalibration = r;
+  renderCalTableLive();
+}
+let lastCalibration: CalibrationResult | null = null;
+/** The calibration table lists only phones that are still connected. */
+function renderCalTableLive() {
+  if (!lastCalibration) return;
+  const live = new Set(livePhones().map((p) => p.phone_id));
+  const per_phone = Object.fromEntries(Object.entries(lastCalibration.per_phone).filter(([id]) => live.has(id)));
+  const table = $<HTMLTableElement>("calTable");
+  if (Object.keys(per_phone).length) renderCalTable(table, { ...lastCalibration, per_phone });
+  else table.innerHTML = "";
 }
 
 // ---- detections ---------------------------------------------------------------------------
@@ -195,12 +215,11 @@ document.addEventListener("pointerdown", () => unlockAudio());
 setInterval(() => { if ($<HTMLInputElement>("auto").checked && phase === "idle" && !isBusy() && session?.phones.some((p) => p.connected)) void calibrate("lfm_single").catch(showCalError); }, 30_000);
 
 // ---- room, layout ----------------------------------------------------------------------------
-$("roomBtn").addEventListener("click", () => void guard("layoutMsg", () => api.putRoom({
-  width_m: num("rw"), height_m: num("rh"), temperature_c: num("rt"), speaker_x_m: num("sx"), speaker_y_m: num("sy"),
-})));
+$("roomBtn").addEventListener("click", () => void guard("layoutMsg", () => api.putRoom(centred({
+  width_m: num("rw"), height_m: num("rh"), temperature_c: num("rt"), speaker_x_m: 0, speaker_y_m: 0,
+}))));
 map.onMovePhone = (id, x, y) => { const p = session?.phones.find((q) => q.phone_id === id); void guard("layoutMsg", () => api.putPhone(id, { label: p?.label, x_m: x, y_m: y })); };
-map.onMoveSpeaker = (x, y) => { if (session) void guard("layoutMsg", () => api.putRoom({ ...session!.room, speaker_x_m: x, speaker_y_m: y })); };
-$("heat").addEventListener("change", refresh); $("hyp").addEventListener("change", refresh);
+$("heat").addEventListener("change", refresh); $("hyp").addEventListener("change", refresh); $("dist").addEventListener("change", refresh);
 
 $("saveLayout").addEventListener("click", () => {
   if (!session) return;
@@ -213,7 +232,7 @@ $("restoreLayout").addEventListener("click", () => void guard("layoutMsg", async
   let saved: { room: SessionState["room"]; phones: { id: string; label: string; x: number; y: number }[] } | null = null;
   try { saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null"); } catch { /* ignore */ }
   if (!saved) throw new Error("Nothing saved yet. Press Save layout once the positions are right.");
-  await api.putRoom(saved.room);
+  await api.putRoom(centred(saved.room));
   for (const p of saved.phones) await api.putPhone(p.id, { label: p.label, x_m: p.x, y_m: p.y });
   say("layoutMsg", `Restored the room and ${saved.phones.length} phone positions. Phones that haven't joined yet keep their place.`);
 }));
