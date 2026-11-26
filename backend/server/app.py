@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, FiniteFloat, ValidationError
 
+from backend.dsp import ranging
 from backend.server.audio_buffer import BUFFER_DURATION_S, decode_audio_frame
 from backend.server.events import EventLoop
 from backend.server.recording import Recording
@@ -69,6 +70,19 @@ class NewTrial(BaseModel):
     event_id: str | None = None
 
 
+class LocateArm(BaseModel):
+    apply: bool = True  # False: only check whether phones moved
+
+
+class LocateSolve(BaseModel):
+    locate_id: str
+
+
+class LayoutTurn(BaseModel):
+    degrees: FiniteFloat = 0.0
+    mirror: bool = False
+
+
 def _inside(room: RoomConfig, x_m: float, y_m: float) -> bool:
     return 0 <= x_m <= room.width_m and 0 <= y_m <= room.height_m
 
@@ -109,6 +123,7 @@ def create_app(
 ) -> FastAPI:
     dashboards: set[SocketQueue] = set()
     phones: dict[str, SocketQueue] = {}
+    emit_tasks: set[asyncio.Task] = set()
 
     def broadcast(payload: dict) -> None:
         for queue in dashboards:
@@ -175,6 +190,8 @@ def create_app(
             raise HTTPException(422, "Phone coordinates must be inside the room")
         phone = session.set_phone(phone_id, **position.model_dump(exclude_none=True))
         session.positioned.add(phone_id)
+        if phone_id in session.located:  # a hand correction becomes the reference for "moved" checks
+            session.located[phone_id] = (phone.x_m, phone.y_m)
         broadcast(session.snapshot())
         push_status(session, phone_id)
         return phone
@@ -217,6 +234,55 @@ def create_app(
             for phone_id in phones:
                 push_status(session, phone_id)
         return payload
+
+    async def send_emits(session: Session, run) -> None:
+        """Tell each phone to chirp in its slots; the dashboard plays the laptop slots."""
+        slots = ranging.schedule(run.order)
+        for k, who in enumerate(slots):
+            delay = run.armed_monotonic_s + k * ranging.SLOT_S - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if session.locate is not run:
+                return
+            if who in phones:
+                _enqueue(phones[who], {"type": "emit_chirp", "locate_id": run.locate_id, "slot": k})
+
+    @app.post("/api/locate/arm")
+    async def arm_locate(request: Request, body: LocateArm = LocateArm()):
+        session: Session = request.app.state.session
+        try:
+            run = session.arm_locate(apply=body.apply)
+        except CalibrationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        task = asyncio.create_task(send_emits(session, run))
+        emit_tasks.add(task)
+        task.add_done_callback(emit_tasks.discard)
+        return run.response()
+
+    @app.post("/api/locate/solve")
+    async def solve_locate(body: LocateSolve, request: Request):
+        session: Session = request.app.state.session
+        try:
+            result = await session.solve_locate(body.locate_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except CalibrationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        broadcast(result)
+        if result["applied"]:
+            broadcast(session.snapshot())
+        for phone_id in phones:  # also clears each phone's "Chirping" screen
+            push_status(session, phone_id)
+        return result
+
+    @app.post("/api/layout/turn")
+    async def turn_layout(body: LayoutTurn, request: Request):
+        session: Session = request.app.state.session
+        session.turn_layout(body.degrees, body.mirror)
+        broadcast(session.snapshot())
+        for phone_id in phones:
+            push_status(session, phone_id)
+        return session.snapshot()
 
     def discard_recording(session: Session) -> None:
         recording, session.recording = session.recording, None

@@ -202,6 +202,34 @@ def sync_scenario(*, n_phones: int = 4, n_chirps: int = 3, chirp_spacing_s: floa
     return simulate(room, phones, events, dur, echo=echo, seed=seed, notes="sync_scenario")
 
 
+CENTRED_ROOM = RoomConfig(width_m=8.0, height_m=6.0, temperature_c=22.0, speaker_x_m=4.0, speaker_y_m=3.0)
+
+
+def locate_scenario(*, n_phones: int = 4, snr_db: float = 30.0, reflection_gain: float = 0.3, seed: int = 0,
+                    room: RoomConfig = CENTRED_ROOM, slot_s: float = 0.7, jitter_s: float = 0.08,
+                    self_path_m: float = 0.03) -> dict[str, np.ndarray]:
+    """Self-localization run: laptop, every phone forward, every phone backward, laptop.
+
+    Each emission starts late by a random amount (network and output latency), and each phone's
+    speaker sits self_path_m from its own microphone.
+    """
+    from backend.dsp.ranging import LAPTOP, schedule
+
+    rng = np.random.default_rng(seed)
+    phones = default_phones(rng, n_phones, snr_db=snr_db)
+    by_id = {p.phone_id: p for p in phones}
+    events = []
+    for k, who in enumerate(schedule([p.phone_id for p in phones])):
+        t = 1.0 + k * slot_s + float(rng.uniform(0, jitter_s))
+        if who == LAPTOP:
+            events.append(SimEvent(t, room.speaker_x_m, room.speaker_y_m, "chirp"))
+        else:
+            ph = by_id[who]
+            events.append(SimEvent(t, ph.x_m + self_path_m, ph.y_m, "chirp"))
+    dur = events[-1].t_s + 1.5
+    return simulate(room, phones, events, dur, reflection_gain=reflection_gain, seed=seed, notes="locate_scenario")
+
+
 JUDGE_POINTS = [  # (x, y, kind); last two are outside the phone hull
     (3.0, 2.5, "clap"), (5.5, 3.5, "drone"), (2.0, 4.0, "clap"), (4.5, 1.8, "drone"),
     (6.0, 2.2, "clap"), (3.5, 4.2, "drone"), (4.0, 3.0, "clap"), (2.2, 2.0, "drone"),

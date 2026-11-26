@@ -1,5 +1,6 @@
 import { FLAG_CLIPPING, FLAG_CLOCK_JUMP, encodeFrame } from "../shared/binaryFrame";
 import { wsUrl } from "../shared/api";
+import { generateChirp, playBuffer } from "../shared/chirpSynth";
 import { isDebug } from "../shared/debug";
 import type { PhoneStatus, SessionState } from "../shared/types";
 import { Diagnostics } from "./diagnostics";
@@ -103,6 +104,18 @@ async function hello() {
 
 function setSync(s: PhoneStatus) { show(syncCopy(s)); }
 
+/** The laptop is locating the phones: play the calibration chirp now so the others can hear us. */
+async function emitChirp() {
+  const out = ctx;
+  if (!out) return;
+  if (out.state !== "running") await out.resume().catch(() => {});
+  if (out.state !== "running") { warn("This phone couldn't play its chirp. Turn the volume up and tap the screen once."); return; }
+  chirp ??= generateChirp(out.sampleRate);
+  show({ tone: "idle", title: "Chirping", detail: "The phones are finding each other. Don't move this phone." });
+  await playBuffer(out, chirp);
+}
+let chirp: Float32Array | null = null;
+
 function connect() {
   const socket = (ws = new WebSocket(wsUrl(`/ws/phone/${encodeURIComponent(phoneId)}`)));
   ws.binaryType = "arraybuffer";
@@ -112,6 +125,7 @@ function connect() {
     try {
       const m = JSON.parse(ev.data);
       if (m.type === "phone_status") { setSync(m as PhoneStatus); void showPosition(); }
+      else if (m.type === "emit_chirp") void emitChirp();
     } catch { /* ignore */ }
   };
   ws.onclose = () => {

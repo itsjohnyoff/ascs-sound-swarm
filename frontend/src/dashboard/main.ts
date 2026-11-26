@@ -4,6 +4,7 @@ import type { CalibrationResult, Detection, Phone, SessionState, Trial } from ".
 import { isBusy, renderCalTable, runCalibration, unlockAudio } from "./calibration";
 import { FloorMap } from "./floorMap";
 import { FpsMeter } from "./fps";
+import { locateSummary, runLocate } from "./locate";
 import { centred, distances, roomCentre, speakerOffCentre } from "./geometry";
 import { errorM, insideHull, summarize } from "./judge";
 import { nextAction, readiness } from "./readiness";
@@ -213,6 +214,27 @@ $("calBtn").addEventListener("click", () => { unlockAudio(); void calibrate("lfm
 // Any click unlocks sound so the repeat chirp and trial chirps can play later without a gesture.
 document.addEventListener("pointerdown", () => unlockAudio());
 setInterval(() => { if ($<HTMLInputElement>("auto").checked && phase === "idle" && !isBusy() && session?.phones.some((p) => p.connected)) void calibrate("lfm_single").catch(showCalError); }, 30_000);
+
+// ---- locate phones by sound -----------------------------------------------------------------------
+const phoneName = (id: string) => session?.phones.find((p) => p.phone_id === id)?.label || id;
+async function locate(apply: boolean, msgId: string, button: HTMLButtonElement) {
+  if (isBusy()) { say(msgId, "Wait for the current chirp to finish.", true); return; }
+  button.disabled = true;
+  say(msgId, apply ? "Phones are chirping in turn…" : "Checking positions…");
+  try {
+    const r = await runLocate(apply);
+    if (r) say(msgId, locateSummary(r, phoneName), !r.success);
+  } catch (e) {
+    say(msgId, (e as Error).message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+$("locateBtn").addEventListener("click", () => { unlockAudio(); void locate(true, "locateMsg", $<HTMLButtonElement>("locateBtn")); });
+$("checkMovedBtn").addEventListener("click", () => { unlockAudio(); void locate(false, "movedMsg", $<HTMLButtonElement>("checkMovedBtn")); });
+$("turnLeft").addEventListener("click", () => void guard("locateMsg", () => api.turnLayout(-15)));
+$("turnRight").addEventListener("click", () => void guard("locateMsg", () => api.turnLayout(15)));
+$("mirrorBtn").addEventListener("click", () => void guard("locateMsg", () => api.turnLayout(0, true)));
 
 // ---- room, layout ----------------------------------------------------------------------------
 $("roomBtn").addEventListener("click", () => void guard("layoutMsg", () => api.putRoom(centred({

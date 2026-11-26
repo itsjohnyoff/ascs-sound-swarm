@@ -45,6 +45,17 @@ export interface EvalSummary {
   mean_error_m: number | null; median_error_m: number | null;
   p90_error_m: number | null; max_error_m: number | null;
 }
+export interface LocatedPhone {
+  status: "ok" | "check" | "failed"; x_m: number | null; y_m: number | null; rms_m: number | null;
+  heard?: number; heard_by?: number; moved_m: number | null; moved?: boolean;
+}
+export interface LocateResult {
+  type?: "locate_result"; success: boolean; applied: boolean; anchored: boolean;
+  rms_m: number | null; error: string | null; phones: Record<string, LocatedPhone>;
+}
+export interface LocateArmed {
+  locate_id: string; slot_s: number; order: string[]; laptop_slots: number[]; duration_s: number;
+}
 export interface PhoneStatus {
   type: "phone_status"; phone_id: string; synced: boolean;
   residual_ms: number | null; drift_ppm: number | null; state: SyncState;
