@@ -163,3 +163,15 @@ dialog svg { width: min(18rem, 100%); height: auto; }
   #mapWrap { overflow: hidden; }
   #mapWrap canvas { position: absolute; inset: 0; }
 }
+
+/* Get ready steps */
+.steps { list-style: none; margin: 0 0 .75rem; padding: 0; counter-reset: step; }
+.steps li { counter-increment: step; display: grid; grid-template-columns: 1.5rem 1fr auto; column-gap: .5rem;
+  padding: .45rem 0; border-top: 1px solid var(--rule, #27303a); }
+.steps li::before { content: counter(step); color: var(--mute, #8996a1); }
+.steps .step-state { font-size: .85rem; color: var(--mute, #8996a1); }
+.steps li[data-state="done"] .step-state { color: var(--pass); }
+.steps li[data-state="failed"] .step-state { color: var(--fail); }
+.steps li[data-state="running"] .step-state { color: var(--warn); }
+.steps li p { grid-column: 2 / 4; margin: .2rem 0 0; font-size: .9rem; color: var(--mute, #8996a1); }
+.steps li[data-state="failed"] p { color: var(--ink, #dde4ea); }

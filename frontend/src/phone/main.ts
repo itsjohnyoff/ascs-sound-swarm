@@ -2,7 +2,7 @@ import { FLAG_CLIPPING, FLAG_CLOCK_JUMP, encodeFrame } from "../shared/binaryFra
 import { wsUrl } from "../shared/api";
 import { generateChirp, playBuffer } from "../shared/chirpSynth";
 import { isDebug } from "../shared/debug";
-import type { PhoneStatus, SessionState } from "../shared/types";
+import type { PhoneHint, PhoneStatus, SessionState } from "../shared/types";
 import { Diagnostics } from "./diagnostics";
 import { micError, syncCopy, type Say } from "./copy";
 import "./style.css";
@@ -35,7 +35,11 @@ const notice = (m: string, bad = false) => {
   const d = document.createElement("div"); d.className = bad ? "notice bad" : "notice"; d.textContent = m; $("notices").appendChild(d);
 };
 const warn = (m: string) => notice(m);
-const show = (say: Say) => { $("state").dataset.tone = say.tone; $("title").textContent = say.title; $("detail").textContent = say.detail; };
+const show = (say: Say) => {
+  $("state").dataset.tone = say.tone;
+  document.body.dataset.tone = say.tone; // the whole screen carries the state, readable from across the room
+  $("title").textContent = say.title; $("detail").textContent = say.detail;
+};
 const log = (m: string) => { show({ tone: "bad", title: "Something went wrong", detail: m }); };
 
 if (!window.isSecureContext) notice(micError(null, false), true);
@@ -111,7 +115,7 @@ async function emitChirp() {
   if (out.state !== "running") await out.resume().catch(() => {});
   if (out.state !== "running") { warn("This phone couldn't play its chirp. Turn the volume up and tap the screen once."); return; }
   chirp ??= generateChirp(out.sampleRate);
-  show({ tone: "idle", title: "Chirping", detail: "The phones are finding each other. Don't move this phone." });
+  show({ tone: "idle", title: "Put me down and don't touch", detail: "The phones are finding each other by sound." });
   await playBuffer(out, chirp);
 }
 let chirp: Float32Array | null = null;
@@ -126,6 +130,7 @@ function connect() {
       const m = JSON.parse(ev.data);
       if (m.type === "phone_status") { setSync(m as PhoneStatus); void showPosition(); }
       else if (m.type === "emit_chirp") void emitChirp();
+      else if (m.type === "phone_hint") { const h = m as PhoneHint; show({ tone: h.tone, title: h.title, detail: h.detail }); }
     } catch { /* ignore */ }
   };
   ws.onclose = () => {

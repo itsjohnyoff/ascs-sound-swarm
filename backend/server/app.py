@@ -78,6 +78,16 @@ class LocateSolve(BaseModel):
     locate_id: str
 
 
+class LevelSolve(BaseModel):
+    level_id: str
+
+
+class PhoneHint(BaseModel):
+    tone: Literal["ok", "warn", "bad", "idle"] = "idle"
+    title: str = Field(max_length=60)
+    detail: str = Field(default="", max_length=160)
+
+
 class LayoutTurn(BaseModel):
     degrees: FiniteFloat = 0.0
     mirror: bool = False
@@ -247,6 +257,44 @@ def create_app(
             if who in phones:
                 _enqueue(phones[who], {"type": "emit_chirp", "locate_id": run.locate_id, "slot": k})
 
+    def hint(phone_id: str, tone: str, title: str, detail: str) -> None:
+        """One instruction on a phone's screen (the phone page shows it full screen)."""
+        if phone_id in phones:
+            _enqueue(phones[phone_id], {"type": "phone_hint", "tone": tone, "title": title, "detail": detail})
+
+    LEVEL_HINTS = {
+        "ok": ("ok", "Heard the laptop", "Put me down and don't touch."),
+        "quiet": ("warn", "I can barely hear the laptop", "Turn the laptop volume up, or move me closer."),
+        "silent": ("bad", "I can't hear the laptop", "Turn the laptop volume up and check nothing covers my microphone."),
+        "clipping": ("warn", "The laptop is too loud for me", "Turn the laptop volume down a little."),
+    }
+
+    @app.post("/api/level/arm")
+    async def arm_level(request: Request):
+        session: Session = request.app.state.session
+        try:
+            level_id = session.arm_level()
+        except CalibrationConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"level_id": level_id}
+
+    @app.post("/api/level/solve")
+    async def solve_level(body: LevelSolve, request: Request):
+        session: Session = request.app.state.session
+        try:
+            result = await session.solve_level(body.level_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        for pid, report in result["per_phone"].items():
+            hint(pid, *LEVEL_HINTS[report["verdict"]])
+        return result
+
+    @app.post("/api/phones/{phone_id}/hint")
+    async def post_hint(phone_id: str, body: PhoneHint):
+        if phone_id not in phones:
+            raise HTTPException(404, "That phone isn't connected")
+        hint(phone_id, body.tone, body.title, body.detail)
+
     @app.post("/api/locate/arm")
     async def arm_locate(request: Request, body: LocateArm = LocateArm()):
         session: Session = request.app.state.session
@@ -254,6 +302,8 @@ def create_app(
             run = session.arm_locate(apply=body.apply)
         except CalibrationConflict as exc:
             raise HTTPException(409, str(exc)) from exc
+        for pid in run.order:
+            hint(pid, "idle", "Finding the phones", "Volume up, phone flat, don't touch it.")
         task = asyncio.create_task(send_emits(session, run))
         emit_tasks.add(task)
         task.add_done_callback(emit_tasks.discard)
