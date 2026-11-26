@@ -4,11 +4,11 @@ import { isRoomPoint } from "./trialFlow";
 
 export interface MapModel {
   room: Room; phones: Phone[]; detections: Detection[]; // newest last
-  showHeat: boolean; showHyperbolas: boolean;
+  showHeat: boolean; showHyperbolas: boolean; showDistances: boolean;
   groundTruth: { x: number; y: number } | null;
   linkedEstimate: Detection | null;
 }
-type DragTarget = { kind: "phone"; id: string } | { kind: "speaker" } | null;
+type DragTarget = { id: string } | null; // only phones move: the speaker is fixed at the centre
 
 const INK = "#dde4ea", MUTE = "#8996a1", GRID = "#1b222a", EDGE = "#5d6b79";
 const GRADE_COLOR = { pass: "#66b07a", warn: "#cba653", fail: "#d4706a" } as const;
@@ -21,7 +21,6 @@ export class FloorMap {
   model: MapModel | null = null;
   judgeMode = false;
   onMovePhone: (id: string, x: number, y: number) => void = () => {};
-  onMoveSpeaker: (x: number, y: number) => void = () => {};
   onPick: (x: number, y: number) => void = () => {};
   private dirty = true;
   /** Called after each draw with wall time and cost in ms (used by the ?debug=1 fps meter). */
@@ -51,8 +50,7 @@ export class FloorMap {
   private hit(x: number, y: number): DragTarget {
     const m = this.model; if (!m) return null;
     const tol = 14 / this.scale;
-    if (Math.hypot(x - m.room.speaker_x_m, y - m.room.speaker_y_m) < tol) return { kind: "speaker" };
-    for (const p of m.phones) if (Math.hypot(x - p.x_m, y - p.y_m) < tol) return { kind: "phone", id: p.phone_id };
+    for (const p of m.phones) if (Math.hypot(x - p.x_m, y - p.y_m) < tol) return { id: p.phone_id };
     return null;
   }
 
@@ -67,8 +65,7 @@ export class FloorMap {
     const p = this.toRoom(e);
     const x = Math.min(Math.max(p.x, 0), this.model.room.width_m);
     const y = Math.min(Math.max(p.y, 0), this.model.room.height_m);
-    if (this.drag.kind === "speaker") { this.model.room.speaker_x_m = x; this.model.room.speaker_y_m = y; }
-    else { const id = this.drag.id; const ph = this.model.phones.find((q) => q.phone_id === id); if (ph) { ph.x_m = x; ph.y_m = y; } }
+    const id = this.drag.id; const ph = this.model.phones.find((q) => q.phone_id === id); if (ph) { ph.x_m = x; ph.y_m = y; }
     this.dirty = true;
   }
   private up(e: PointerEvent) {
@@ -83,7 +80,7 @@ export class FloorMap {
     const p = this.toRoom(e);
     const x = Math.round(Math.min(Math.max(p.x, 0), this.model.room.width_m) * 100) / 100;
     const y = Math.round(Math.min(Math.max(p.y, 0), this.model.room.height_m) * 100) / 100;
-    if (d.kind === "speaker") this.onMoveSpeaker(x, y); else this.onMovePhone(d.id, x, y);
+    this.onMovePhone(d.id, x, y);
   }
 
   private px(x: number) { return this.ox + x * this.scale; }
@@ -146,6 +143,8 @@ export class FloorMap {
       }
     }
 
+    if (m.showDistances && !this.judgeMode) this.drawDistances(m);
+
     // speaker
     ctx.fillStyle = INK; ctx.fillRect(this.px(m.room.speaker_x_m) - 7, this.py(m.room.speaker_y_m) - 7, 14, 14);
     ctx.font = "13px system-ui"; ctx.fillText("Speaker", this.px(m.room.speaker_x_m) + 10, this.py(m.room.speaker_y_m) + 4);
@@ -166,6 +165,35 @@ export class FloorMap {
       ctx.fillText(!p.connected ? "offline" : synced && p.residual_ms != null ? `${p.residual_ms.toFixed(2)} ms` : "not synced", x + 16, y + 11);
       ctx.globalAlpha = 1;
     }
+  }
+
+  // Dashed lines with lengths: speaker to each phone, and around the outline of the phones.
+  private drawDistances(m: MapModel) {
+    const ctx = this.ctx;
+    const speaker = { x_m: m.room.speaker_x_m, y_m: m.room.speaker_y_m };
+    const angle = (p: Phone) => Math.atan2(p.y_m - speaker.y_m, p.x_m - speaker.x_m);
+    const ring = [...m.phones].sort((a, b) => angle(a) - angle(b));
+    const segments: [{ x_m: number; y_m: number }, { x_m: number; y_m: number }][] = m.phones.map((p) => [speaker, p]);
+    if (ring.length === 2) segments.push([ring[0]!, ring[1]!]);
+    if (ring.length > 2) ring.forEach((p, i) => segments.push([p, ring[(i + 1) % ring.length]!]));
+    ctx.font = "12px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const [a, b] of segments) {
+      ctx.strokeStyle = "rgba(137,150,161,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
+      ctx.beginPath(); ctx.moveTo(this.px(a.x_m), this.py(a.y_m)); ctx.lineTo(this.px(b.x_m), this.py(b.y_m)); ctx.stroke(); ctx.setLineDash([]);
+      const text = `${Math.hypot(a.x_m - b.x_m, a.y_m - b.y_m).toFixed(2)} m`;
+      const at = (t: number) => [this.px(a.x_m + (b.x_m - a.x_m) * t), this.py(a.y_m + (b.y_m - a.y_m) * t)] as const;
+      let [tx, ty] = at(0.5);
+      // A line between two phones can cross the middle: keep its label off the speaker.
+      if (a !== speaker && Math.hypot(tx - this.px(speaker.x_m), ty - this.py(speaker.y_m)) < 70) {
+        const dx = b.x_m - a.x_m, dy = b.y_m - a.y_m, len = Math.hypot(dx, dy) || 1;
+        const side = dy >= 0 ? 1 : -1; // push down and to the left, away from the "Speaker" text
+        tx += (-dy / len) * 24 * side; ty += (dx / len) * 24 * side;
+      }
+      const tw = ctx.measureText(text).width + 8;
+      ctx.fillStyle = "#12171d"; ctx.fillRect(tx - tw / 2, ty - 8, tw, 16);
+      ctx.fillStyle = MUTE; ctx.fillText(text, tx, ty);
+    }
+    ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
   }
 
   // Each inlier TDOA gives a hyperbola |d_i - d_j| = c * tdoa. Sampled in polar-ish form via a coarse grid march.

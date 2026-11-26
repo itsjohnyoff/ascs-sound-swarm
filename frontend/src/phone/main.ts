@@ -46,6 +46,8 @@ let seq = 0;
 let pendingJump = false;
 let joined = false;
 let retry = 0;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let micStream: MediaStream | null = null;
 let myPos: { x: number; y: number } | null = null;
 let sampleRate = 0;
 
@@ -102,7 +104,7 @@ async function hello() {
 function setSync(s: PhoneStatus) { show(syncCopy(s)); }
 
 function connect() {
-  ws = new WebSocket(wsUrl(`/ws/phone/${encodeURIComponent(phoneId)}`));
+  const socket = (ws = new WebSocket(wsUrl(`/ws/phone/${encodeURIComponent(phoneId)}`)));
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { retry = 0; void hello().then(showPosition); show({ tone: "idle", title: "Waiting for sync", detail: "Connected. The laptop plays a chirp to sync the phones. Keep the room quiet." }); };
   ws.onmessage = (ev) => {
@@ -113,12 +115,13 @@ function connect() {
     } catch { /* ignore */ }
   };
   ws.onclose = () => {
-    if (!joined) return;
+    if (!joined || socket !== ws) return; // ignore sockets we already replaced
     show({ tone: "warn", title: "Connection lost", detail: "Reconnecting to the laptop. Stay on this page." });
     diag.reconnects++;
     const delay = Math.min(8000, 500 * 2 ** retry++);
     pendingJump = true; // gap in the timeline while offline
-    setTimeout(connect, delay);
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(connect, delay);
   };
 }
 
@@ -129,6 +132,9 @@ async function join() {
   let stream: MediaStream | undefined;
   try {
     stream = await openMic();
+    micStream = stream;
+    // The phone can take the microphone away (call, another app, long lock): offer to join again.
+    stream.getAudioTracks()[0]?.addEventListener("ended", () => leave("The microphone stopped. Tap Join to connect again."));
     ctx = new AudioContext(); // never force a rate: report the real one
     sampleRate = ctx.sampleRate;
     diag.sampleRate = sampleRate;
@@ -159,10 +165,6 @@ async function join() {
     show({ tone: "idle", title: "Connecting to the laptop", detail: "Microphone is on. Keep this page open." });
     connect();
     joined = true;
-    document.addEventListener("visibilitychange", () => {
-      pendingJump = true;
-      if (!document.hidden) { void wake(); show({ tone: "warn", title: "Needs re-sync", detail: "The screen was off, so timing was lost. Wait for the next chirp." }); }
-    });
     button.hidden = true;
     $("vuWrap").hidden = false;
     void wake();
@@ -187,4 +189,37 @@ async function wake() {
   }
 }
 
+/** Drop the session completely so Join starts a fresh one with the same phone id. */
+function leave(why: string) {
+  if (!joined) return;
+  joined = false;
+  clearTimeout(retryTimer);
+  ws?.close();
+  micStream?.getTracks().forEach((track) => track.stop());
+  node?.disconnect();
+  if (ctx && ctx.state !== "closed") void ctx.close().catch(() => {});
+  ctx = null; node = null; micStream = null;
+  const button = $<HTMLButtonElement>("join");
+  button.textContent = "Join again";
+  button.disabled = false;
+  button.hidden = false;
+  $("vuWrap").hidden = true;
+  show({ tone: "bad", title: "Disconnected", detail: why });
+}
+
+/** Back on screen: restart audio and reconnect right away instead of waiting for the retry timer. */
+async function comeBack() {
+  const current = ctx;
+  if (!joined || !current) return;
+  pendingJump = true;
+  void wake();
+  // iOS can leave resume() pending forever, so don't wait on it for more than a moment.
+  await Promise.race([current.resume().catch(() => {}), new Promise((r) => setTimeout(r, 1500))]);
+  if (ctx !== current) return;
+  if (current.state !== "running") { leave("The phone paused the microphone. Tap Join to connect again."); return; }
+  if (!ws || ws.readyState >= WebSocket.CLOSING) { clearTimeout(retryTimer); retry = 0; connect(); }
+  else show({ tone: "warn", title: "Needs re-sync", detail: "The screen was off, so timing was lost. Wait for the next chirp." });
+}
+
+document.addEventListener("visibilitychange", () => { if (document.hidden) pendingJump = true; else void comeBack(); });
 $("join").addEventListener("click", () => void join());

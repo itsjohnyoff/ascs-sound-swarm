@@ -154,3 +154,12 @@ dialog svg { width: min(18rem, 100%); height: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) { .status, .status.flash { transition: none; animation: none; } }
+
+/* desktop: the map row is exactly the window height; the side panel scrolls inside it.
+   Without this a long panel stretches the canvas and the map is drawn off screen. */
+@media (min-width: 62.0625rem) {
+  main { grid-template-rows: minmax(0, 1fr); }
+  aside { min-height: 0; }
+  #mapWrap { overflow: hidden; }
+  #mapWrap canvas { position: absolute; inset: 0; }
+}
