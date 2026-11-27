@@ -1,5 +1,15 @@
 # Run book
 
+## Quick start
+
+1. Start the server: `python scripts/start_https.py --mode lan`. If it warns that this Wi-Fi may block phones, use a phone hotspot.
+2. Put the laptop in the middle of the room. Open the dashboard at `https://localhost:8443/`, enter the room size and press **Apply**.
+3. On each phone, scan **Phone QR**, tap **Join** and turn the volume up. Put the phones near the corners.
+4. Press **Get ready**. It checks the phones joined, how loud the laptop is, finds where the phones are by sound, syncs their clocks, and asks you to clap next to one phone. If a step fails it says what to fix; press **Continue**.
+5. Open **Judge mode** (or open `/?judge=1` on the projector laptop).
+
+Everything else (manual positions, map layers, calibration table, recording) is under **Details**.
+
 ## Setup (once)
 
 ```bash
@@ -36,9 +46,10 @@ Soak (Gate 3 prep, about 11 min): `python scripts/soak.py --minutes 10 --out soa
 ## Room setup
 
 1. Phones near the corners, judge points inside their hull, never collinear (the GDOP banner warns).
-2. Tape-measure each phone's bottom edge (mic) and the speaker to about 5 cm. Type them in the Phones and Room panels; the server keeps them, phones cannot overwrite them.
-3. Speaker at a known spot with line of sight to every phone. Enter room temperature.
-4. Network: phone hotspot or travel router. `--mode tunnel` only as a fallback.
+2. Phones find their own positions by sound (**Get ready**, or **Details → Locate phones again**). If the map comes out turned or mirrored compared with the room, use **Turn** or **Mirror**. A phone that couldn't be placed can be dragged or typed in under **Details**; the server keeps positions, phones cannot overwrite them.
+3. The speaker (laptop) is always the room centre, with line of sight to every phone. Enter room temperature.
+4. Before the judged run, **Check phones haven't moved** (judge panel, under Checks and export) flags any phone moved more than 10 cm.
+5. Network: phone hotspot or travel router. `--mode tunnel` only as a fallback.
 
 ## Sync spike (Gate 0, H3)
 

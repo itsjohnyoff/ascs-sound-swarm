@@ -6,74 +6,106 @@
 <title>ASCS Sound Swarm</title>
 </head>
 <body>
-  <header class="status" id="statusBar" data-tone="idle">
-    <div role="status"><h1 id="headline">Connecting…</h1><p id="detail"></p></div>
+  <header class="bar" id="statusBar" data-tone="idle">
+    <div class="sentence" role="status"><h1 id="headline">Connecting…</h1><p id="detail"></p></div>
     <div class="tools">
       <button id="nextHint" hidden></button>
-      <label class="inline" data-setup><input type="checkbox" id="heat"> Heatmap</label>
-      <label class="inline" data-setup><input type="checkbox" id="dist" checked> Distances</label>
-      <label class="inline" data-setup><input type="checkbox" id="hyp"> Timing curves</label>
-      <button class="quiet" id="clearPinsBtn" data-setup>Clear pins</button>
-      <button class="quiet" id="qrBtn" data-setup>Phone QR</button>
-      <button class="quiet" id="judgeBtn" aria-pressed="false" aria-controls="judge">Judge mode</button>
+      <button id="qrBtn" data-setup>Phone QR</button>
+      <button id="detailsBtn" aria-pressed="false" aria-controls="panel" data-setup>Details</button>
+      <button id="judgeBtn" aria-pressed="false" aria-controls="judge">Judge mode</button>
     </div>
   </header>
   <main>
     <div id="mapWrap">
-      <canvas id="map" aria-label="Floor map"></canvas>
-      <div class="legend"><span><i style="background:var(--pass)"></i>Synced</span><span><i style="background:var(--warn)"></i>Loose</span><span><i style="background:var(--fail)"></i>Not synced</span></div>
+      <canvas id="map" aria-label="Floor plan with phones, speaker and located sounds"></canvas>
+      <ul class="legend" aria-label="Phone sync"><li><i data-tone="ok"></i>Synced</li><li><i data-tone="warn"></i>Loose</li><li><i data-tone="bad"></i>Not synced</li></ul>
     </div>
-    <aside>
-      <section data-setup><h2>Get ready</h2>
-        <p class="hint">Put the laptop in the middle of the room and the phones near the corners, volume up. Then press Get ready.</p>
+    <aside id="panel">
+      <section data-setup>
+        <h2>Get ready</h2>
+        <p class="hint">Laptop in the middle of the room, phones near the corners, phone volume up.</p>
+        <div class="room">
+          <div><label for="rw">Width, m</label><input id="rw" type="number" step="0.01" inputmode="decimal"></div>
+          <div><label for="rh">Length, m</label><input id="rh" type="number" step="0.01" inputmode="decimal"></div>
+          <div><label for="rt">Temp, °C</label><input id="rt" type="number" step="0.1" inputmode="decimal"></div>
+          <button id="roomBtn">Apply</button>
+        </div>
+        <p class="hint" id="speakerNote"></p>
         <ol class="steps" id="steps"></ol>
-        <div class="row"><button id="readyBtn">Get ready</button></div>
+        <button id="readyBtn" class="primary wide">Get ready</button>
       </section>
-      <section data-setup><h2>Set up the room</h2>
-        <p class="hint">Measure from the top-left corner, in meters. Drag phones on the map or type exact values.</p>
-        <div class="row"><div><label for="rw">Width</label><input id="rw" type="number" step="0.01"></div><div><label for="rh">Height</label><input id="rh" type="number" step="0.01"></div><div><label for="rt">Temp °C</label><input id="rt" type="number" step="0.1"></div></div>
-        <div class="row" style="margin-top:.6rem"><p class="hint" id="speakerNote" style="margin:0"></p><button id="roomBtn" class="quiet">Apply</button></div>
-        <h3 style="font-size:var(--step-0);margin:1rem 0 .5rem">Phone positions</h3>
-        <p class="hint">Phones take turns chirping and find each other by sound. Put them down, turn their volume up, keep the room quiet.</p>
-        <div class="row"><button id="locateBtn">Locate phones</button><button class="quiet" id="turnLeft" aria-label="Turn layout left 15 degrees">Turn ⟲</button><button class="quiet" id="turnRight" aria-label="Turn layout right 15 degrees">Turn ⟳</button><button class="quiet" id="mirrorBtn">Mirror</button></div>
-        <p class="note" id="locateMsg" role="status"></p>
-        <div id="phones"><p class="hint">Phones appear here when they join.</p></div>
-        <div class="row"><button class="quiet" id="saveLayout">Save layout</button><button class="quiet" id="restoreLayout">Restore saved layout</button></div>
-        <p class="note" id="layoutMsg" role="status"></p>
-        <h3 style="font-size:var(--step-0);margin:.8rem 0 .3rem">Distances</h3>
-        <div class="table-scroll"><table id="distances"></table></div>
-      </section>
-      <section data-setup><h2>Sync the phones</h2>
-        <p class="hint">The laptop plays a short chirp so every phone can line up its clock. Raise the volume and keep the room quiet.</p>
-        <div class="row"><button id="calBtn">Calibrate</button><label class="inline"><input type="checkbox" id="auto" checked> Repeat every 30 s</label></div>
-        <p class="note" id="calMsg" role="status"></p>
-        <div class="table-scroll"><table id="calTable"></table></div>
-        <h3 style="font-size:var(--step-0);margin:1rem 0 .5rem">Phone health</h3>
+
+      <section data-setup>
+        <h2>Phones</h2>
         <div class="table-scroll"><table id="health" class="health"></table></div>
         <p class="note" id="resyncMsg" role="status"></p>
-        <h3 style="font-size:var(--step-0);margin:1rem 0 .5rem">Record a test</h3>
-        <div class="row record-actions"><div><label for="recName">File name</label><input id="recName" type="text" value="spike-01" maxlength="68"></div><button id="recStart" disabled>Start recording</button><button id="recStop" class="danger" disabled>Stop and save</button></div>
+        <div class="row">
+          <button id="turnLeft" aria-label="Turn the layout 15 degrees left">Turn left</button>
+          <button id="turnRight" aria-label="Turn the layout 15 degrees right">Turn right</button>
+          <button id="mirrorBtn">Mirror</button>
+        </div>
+        <p class="hint">If the map is turned or mirrored compared with the room, fix it here.</p>
+        <p class="note" id="locateMsg" role="status"></p>
+      </section>
+
+      <section data-setup data-detail>
+        <h2>Positions</h2>
+        <div class="row"><button id="locateBtn">Locate phones again</button></div>
+        <div id="phones"><p class="hint">Phones appear here when they join.</p></div>
+        <div class="row"><button id="saveLayout">Save layout</button><button id="restoreLayout">Restore saved layout</button></div>
+        <p class="note" id="layoutMsg" role="status"></p>
+        <h3>Distances</h3>
+        <div class="table-scroll"><table id="distances" class="numbers"></table></div>
+      </section>
+
+      <section data-setup data-detail>
+        <h2>Map</h2>
+        <label class="check"><input type="checkbox" id="dist" checked> Distances</label>
+        <label class="check"><input type="checkbox" id="heat"> Heatmap of the last sound</label>
+        <label class="check"><input type="checkbox" id="hyp"> Timing curves</label>
+        <div class="row"><button id="clearPinsBtn">Clear sounds from the map</button></div>
+      </section>
+
+      <section data-setup data-detail>
+        <h2>Clock sync</h2>
+        <div class="row"><button id="calBtn">Calibrate</button><label class="check"><input type="checkbox" id="auto" checked> Repeat every 30 s</label></div>
+        <p class="note" id="calMsg" role="status"></p>
+        <div class="table-scroll"><table id="calTable" class="numbers"></table></div>
+      </section>
+
+      <section data-setup data-detail>
+        <h2>Record a test</h2>
+        <div class="row record"><div><label for="recName">File name</label><input id="recName" type="text" value="spike-01" maxlength="68"></div><button id="recStart" disabled>Start recording</button><button id="recStop" class="danger" disabled>Stop and save</button></div>
         <p class="note" id="recMsg" role="status"></p>
       </section>
-      <section id="judge"><h2>Judge run</h2>
+
+      <section id="judge">
+        <h2>Judge run</h2>
         <div class="strip" id="strip" aria-hidden="true"></div>
         <div class="stats" id="cards"></div>
-        <div class="row"><div><label for="gx">True x</label><input id="gx" type="number" step="0.01"></div><div><label for="gy">True y</label><input id="gy" type="number" step="0.01"></div><div><label for="gc">Sound</label><select id="gc"><option value="clap">Clap</option><option value="drone">Drone</option></select></div></div>
+        <div class="truth">
+          <div><label for="gx">True x, m</label><input id="gx" type="number" step="0.01" inputmode="decimal"></div>
+          <div><label for="gy">True y, m</label><input id="gy" type="number" step="0.01" inputmode="decimal"></div>
+          <div><label for="gc">Sound</label><select id="gc"><option value="clap">Clap</option><option value="drone">Drone</option></select></div>
+        </div>
         <p class="note" id="hullNote"></p>
-        <label class="inline"><input type="checkbox" id="pre" checked> Play a chirp before each trial</label>
+        <label class="check"><input type="checkbox" id="pre" checked> Play a chirp before each trial</label>
         <p class="prompt" id="prompt" role="status"></p>
         <div class="row" id="trialBtns"></div>
         <div id="recent"></div>
         <p class="note" id="status" role="status"></p>
-        <div class="table-scroll"><table id="trials"></table></div>
-        <div class="row" style="margin-top:.8rem"><button class="quiet" id="knownBtn">Check a known point</button><span id="knownBadge"></span></div>
-        <div class="row" style="margin-top:.6rem"><button class="quiet" id="checkMovedBtn">Check phones haven't moved</button></div>
-        <p class="note" id="movedMsg" role="status"></p>
-        <div class="row" style="margin-top:.6rem"><a class="button quiet" href="/api/eval/export.csv" download>Download CSV</a><button id="resetBtn" class="danger">Clear all trials</button></div>
+        <div class="table-scroll"><table id="trials" class="numbers"></table></div>
+        <details class="more">
+          <summary>Checks and export</summary>
+          <div class="row"><button id="knownBtn">Check a known point</button><span id="knownBadge"></span></div>
+          <div class="row"><button id="checkMovedBtn">Check phones haven't moved</button></div>
+          <p class="note" id="movedMsg" role="status"></p>
+          <div class="row"><a class="button" href="/api/eval/export.csv" download>Download CSV</a><button id="resetBtn" class="danger">Clear all trials</button></div>
+        </details>
       </section>
     </aside>
   </main>
-  <dialog id="qr" aria-labelledby="qrTitle"><h2 id="qrTitle">Join on a phone</h2><div id="qrBody" aria-hidden="true"></div><p><a id="qrUrl"></a></p><form method="dialog"><button>Close</button></form></dialog>
+  <dialog id="qr" aria-labelledby="qrTitle"><h2 id="qrTitle">Join on a phone</h2><p class="hint">Scan with the phone's camera, then tap Join.</p><div id="qrBody" aria-hidden="true"></div><p><a id="qrUrl"></a></p><form method="dialog"><button class="primary">Done</button></form></dialog>
   <script type="module" src="/src/dashboard/main.ts"></script>
 </body>
 </html>
