@@ -10,9 +10,11 @@ export interface MapModel {
 }
 type DragTarget = { id: string } | null; // only phones move: the speaker is fixed at the centre
 
-const INK = "#dde4ea", MUTE = "#8996a1", GRID = "#1b222a", EDGE = "#5d6b79";
-const GRADE_COLOR = { pass: "#66b07a", warn: "#cba653", fail: "#d4706a" } as const;
-const CLASS_RGB: Record<string, string> = { drone: "165,139,214", clap: "90,143,208", other: "137,150,161" };
+// Paper palette, matching style.css. The room is a white sheet on paper; cobalt marks only the live estimate.
+const INK = "#1b2328", MUTE = "#5e6a72", GRID = "#e8ecea", EDGE = "#1b2328", SHEET = "#ffffff";
+const ACCENT_RGB = "31,79,216", OLD_RGB = "120,132,140";
+const GRADE_COLOR = { pass: "#2e8540", warn: "#b7791f", fail: "#c2402f" } as const;
+const CLASS_WORD: Record<string, string> = { drone: "drone", clap: "clap", other: "other" };
 
 export function detectionNumber(eventId: string, fallback: number): number {
   const m = /(\d+)$/.exec(eventId);
@@ -115,18 +117,19 @@ export class FloorMap {
     let animating = false;
     const activeIds = new Set(m.detections.map((d) => d.event_id));
     for (const id of this.pinPos.keys()) if (!activeIds.has(id)) this.pinPos.delete(id);
-    const pad = 30;
-    this.scale = Math.min((w - 2 * pad) / m.room.width_m, (h - 2 * pad) / m.room.height_m);
-    this.ox = (w - m.room.width_m * this.scale) / 2; this.oy = (h - m.room.height_m * this.scale) / 2;
+    const pad = 32, legend = 32; // keep the bottom strip free for the legend
+    this.scale = Math.min((w - 2 * pad) / m.room.width_m, (h - 2 * pad - legend) / m.room.height_m);
+    this.ox = (w - m.room.width_m * this.scale) / 2; this.oy = (h - legend - m.room.height_m * this.scale) / 2;
     const W = m.room.width_m, H = m.room.height_m;
 
     const last = m.detections[m.detections.length - 1];
+    ctx.fillStyle = SHEET; ctx.fillRect(this.px(0), this.py(0), W * this.scale, H * this.scale);
     if (m.showHeat && last?.heatmap) {
       const { nx, ny, values } = last.heatmap;
       const cw = (W * this.scale) / nx, ch = (H * this.scale) / ny;
       for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
         const v = values[j * nx + i] ?? 0;
-        ctx.fillStyle = `rgba(203,166,83,${(v * v * 0.6).toFixed(3)})`;
+        ctx.fillStyle = `rgba(${ACCENT_RGB},${(v * v * 0.35).toFixed(3)})`;
         ctx.fillRect(this.ox + i * cw, this.oy + j * ch, cw + 0.5, ch + 0.5);
       }
     }
@@ -143,7 +146,7 @@ export class FloorMap {
     trail.forEach((d, i) => {
       const num = detectionNumber(d.event_id, i + 1);
       const isLast = i === trail.length - 1;
-      const col = CLASS_RGB[d.sound_class] ?? CLASS_RGB.other!;
+      const col = isLast ? ACCENT_RGB : OLD_RGB;
       let pos = this.pinPos.get(d.event_id);
       if (!pos) {
         pos = { x: d.x_m, y: d.y_m };
@@ -156,17 +159,21 @@ export class FloorMap {
       }
       const x = this.px(pos.x), y = this.py(pos.y);
       const r = isLast ? 11 : 8;
-      ctx.fillStyle = `rgba(${col},${isLast ? "0.98" : "0.72"})`;
-      ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
-      ctx.fillStyle = "#0b0f14";
+      ctx.fillStyle = `rgba(${col},${isLast ? "1" : "0.75"})`;
+      // Shape carries the class so it survives a washed-out projector: drones are diamonds, the rest circles.
+      ctx.beginPath();
+      if (d.sound_class === "drone") { ctx.moveTo(x, y - r - 2); ctx.lineTo(x + r + 2, y); ctx.lineTo(x, y + r + 2); ctx.lineTo(x - r - 2, y); ctx.closePath(); }
+      else ctx.arc(x, y, r, 0, 7);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
       ctx.font = isLast ? "700 11px system-ui" : "600 10px system-ui";
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(String(num), x, y + 0.5);
       if (!this.judgeMode) {
-        const tag = `#${num} ${d.sound_class}`;
+        const tag = CLASS_WORD[d.sound_class] ?? d.sound_class;
         ctx.font = isLast ? "600 12px system-ui" : "11px system-ui";
         const tw = ctx.measureText(tag).width + 8;
-        ctx.fillStyle = "rgba(18,23,29,0.82)";
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
         ctx.fillRect(x + r + 3, y - 8, tw, 16);
         ctx.fillStyle = isLast ? INK : MUTE;
         ctx.textAlign = "start";
@@ -181,7 +188,7 @@ export class FloorMap {
 
     if (m.groundTruth) {
       const g = m.groundTruth;
-      ctx.strokeStyle = GRADE_COLOR.pass; ctx.lineWidth = 3;
+      ctx.strokeStyle = INK; ctx.lineWidth = 3;
       ctx.beginPath(); ctx.moveTo(this.px(g.x) - 9, this.py(g.y)); ctx.lineTo(this.px(g.x) + 9, this.py(g.y)); ctx.moveTo(this.px(g.x), this.py(g.y) - 9); ctx.lineTo(this.px(g.x), this.py(g.y) + 9); ctx.stroke();
       const e = m.linkedEstimate;
       if (e) {
@@ -204,14 +211,20 @@ export class FloorMap {
       const synced = p.sync_state === "synced" || p.sync_state === "drifting";
       const grade = gradeResidual(p.residual_ms, synced);
       ctx.globalAlpha = p.connected ? 1 : 0.35;
-      ctx.strokeStyle = "rgba(232,238,245,0.55)"; ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(27,35,40,0.25)"; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(x, y, 13 + Math.min(1, Math.sqrt(p.rms) * 3) * 16, 0, 7); ctx.stroke();
       ctx.fillStyle = GRADE_COLOR[grade];
       ctx.beginPath(); ctx.arc(x, y, 9, 0, 7); ctx.fill();
-      ctx.fillStyle = INK; ctx.font = "600 13px system-ui";
-      ctx.fillText(p.label || p.phone_id, x + 16, y - 4);
-      ctx.fillStyle = MUTE; ctx.font = "12px system-ui";
-      ctx.fillText(!p.connected ? "offline" : synced && p.residual_ms != null ? `${p.residual_ms.toFixed(2)} ms` : "not synced", x + 16, y + 11);
+      const name = p.label || p.phone_id;
+      const sub = !p.connected ? "offline" : synced && p.residual_ms != null ? `${p.residual_ms.toFixed(2)} ms` : "not synced";
+      ctx.font = "600 13px system-ui";
+      const textW = Math.max(ctx.measureText(name).width, ctx.measureText(sub).width);
+      const flip = x + 16 + textW > w - 4; // near the right edge: label on the left so it isn't cut off
+      ctx.textAlign = flip ? "end" : "start";
+      const tx = flip ? x - 16 : x + 16;
+      ctx.fillStyle = INK; ctx.fillText(name, tx, y - 4);
+      ctx.fillStyle = MUTE; ctx.font = "12px system-ui"; ctx.fillText(sub, tx, y + 11);
+      ctx.textAlign = "start";
       ctx.globalAlpha = 1;
     }
     return animating;
@@ -228,7 +241,7 @@ export class FloorMap {
     if (ring.length > 2) ring.forEach((p, i) => segments.push([p, ring[(i + 1) % ring.length]!]));
     ctx.font = "12px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     for (const [a, b] of segments) {
-      ctx.strokeStyle = "rgba(137,150,161,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
+      ctx.strokeStyle = "rgba(94,106,114,0.45)"; ctx.lineWidth = 1; ctx.setLineDash([4, 5]);
       ctx.beginPath(); ctx.moveTo(this.px(a.x_m), this.py(a.y_m)); ctx.lineTo(this.px(b.x_m), this.py(b.y_m)); ctx.stroke(); ctx.setLineDash([]);
       const text = `${Math.hypot(a.x_m - b.x_m, a.y_m - b.y_m).toFixed(2)} m`;
       const at = (t: number) => [this.px(a.x_m + (b.x_m - a.x_m) * t), this.py(a.y_m + (b.y_m - a.y_m) * t)] as const;
@@ -240,7 +253,7 @@ export class FloorMap {
         tx += (-dy / len) * 24 * side; ty += (dx / len) * 24 * side;
       }
       const tw = ctx.measureText(text).width + 8;
-      ctx.fillStyle = "#12171d"; ctx.fillRect(tx - tw / 2, ty - 8, tw, 16);
+      ctx.fillStyle = SHEET; ctx.fillRect(tx - tw / 2, ty - 8, tw, 16);
       ctx.fillStyle = MUTE; ctx.fillText(text, tx, ty);
     }
     ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
@@ -256,7 +269,7 @@ export class FloorMap {
         if (!t.inlier) continue;
         const a = byId.get(t.i), b = byId.get(t.j); if (!a || !b) continue;
         const target = (t.tdoa_ms / 1000) * C; // d_i - d_j (sign per contract: tdoa = t_i - t_j)
-        ctx.strokeStyle = `rgba(210,153,34,${0.3 + 0.5 * t.weight})`;
+        ctx.strokeStyle = `rgba(94,106,114,${0.3 + 0.5 * t.weight})`;
         const step = 0.05;
         ctx.beginPath();
         for (let x = 0; x <= m.room.width_m; x += step) for (let y = 0; y <= m.room.height_m; y += step) {

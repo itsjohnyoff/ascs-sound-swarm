@@ -53,6 +53,8 @@ function renderDistances() {
 }
 const refresh = () => {
   if (!session) return;
+  // Narrow screens size the map box to the room's own shape (see style.css).
+  $("mapWrap").style.setProperty("--room-aspect", `${session.room.width_m} / ${session.room.height_m}`);
   map.model = {
     room: session.room, phones: livePhones(), detections,
     showDistances: $<HTMLInputElement>("dist").checked,
@@ -417,12 +419,25 @@ recordStop.addEventListener("click", () => void guard("recMsg", async () => {
 void restoreRecording(true).catch(() => { recordStart.disabled = false; });
 
 // ---- judge ------------------------------------------------------------------------------------------
-$("judgeBtn").addEventListener("click", () => {
-  judge = !judge; document.body.classList.toggle("judge", judge); map.judgeMode = judge;
+function setJudge(on: boolean) {
+  judge = on; document.body.classList.toggle("judge", judge); map.judgeMode = judge;
   $("judgeBtn").textContent = judge ? "Leave judge mode" : "Judge mode";
   $("judgeBtn").setAttribute("aria-pressed", String(judge));
   map.invalidate(); markNext();
-});
+}
+$("judgeBtn").addEventListener("click", () => setJudge(!judge));
+// The projector laptop can open straight into judge mode: /?judge=1
+if (new URLSearchParams(location.search).get("judge") === "1") setJudge(true);
+
+// Details: everything setup doesn't need day to day. Remembered per browser.
+const DETAILS_KEY = "ascs_details";
+function setDetails(on: boolean) {
+  document.body.classList.toggle("details", on);
+  $("detailsBtn").setAttribute("aria-pressed", String(on));
+  try { localStorage.setItem(DETAILS_KEY, on ? "1" : "0"); } catch { /* storage blocked */ }
+}
+$("detailsBtn").addEventListener("click", () => setDetails(!document.body.classList.contains("details")));
+try { setDetails(localStorage.getItem(DETAILS_KEY) === "1"); } catch { setDetails(false); }
 map.onPick = (x, y) => setTruth(Math.round(x * 100) / 100, Math.round(y * 100) / 100);
 function setTruth(x: number, y: number, updateFields = true) {
   if (trialSaving) return;
@@ -459,13 +474,13 @@ function renderTrialPanel() {
   const btns = $("trialBtns");
   const b = (id: string, label: string, cls = "") =>
     `<button id="${id}" class="${cls}" ${trialSaving || (!truth && id !== "cancelBtn") ? "disabled" : ""}>${label}</button>`;
-  if (phase === "idle") btns.innerHTML = b("startBtn", "Start trial");
+  if (phase === "idle") btns.innerHTML = b("startBtn", "Start trial", "primary");
   else if (phase === "chirping") btns.innerHTML = "";
   else if (phase === "listening") btns.innerHTML = b("missBtn", "Mark as missed", "quiet") + b("cancelBtn", "Cancel", "quiet");
   else {
     const e = candidate && truth ? errorM(candidate, truth.x, truth.y) : null;
     $("prompt").innerHTML = candidate ? `${chip(candidate.sound_class)} at ${candidate.x_m.toFixed(2)}, ${candidate.y_m.toFixed(2)}<div class="result">${e != null ? `${e.toFixed(2)} m off` : ""}</div>` : "";
-    btns.innerHTML = b("logBtn", "Log trial") + b("otherBtn", "Pick another", "quiet") + b("missBtn", "Mark as missed", "quiet");
+    btns.innerHTML = b("logBtn", "Log trial", "primary") + b("otherBtn", "Pick another", "quiet") + b("missBtn", "Mark as missed", "quiet");
   }
   if (phase !== "review") $("recent").innerHTML = "";
   markNext();
