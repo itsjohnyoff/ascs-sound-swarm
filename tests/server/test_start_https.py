@@ -76,6 +76,7 @@ def test_lan_passes_tls_paths_and_lan_origin_to_uvicorn(tmp_path, monkeypatch, c
     popen = subprocess.Popen
     monkeypatch.setattr(start_https, "ROOT", tmp_path)
     monkeypatch.setattr(start_https, "lan_ipv4", lambda: "192.168.1.20")
+    monkeypatch.setattr(start_https, "check_network", lambda address: None)
     monkeypatch.setattr(start_https.shutil, "which", lambda name: None)
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://stale.example")
 
@@ -156,3 +157,27 @@ def test_tunnel_requires_cloudflared(monkeypatch, capsys):
     monkeypatch.setattr(start_https.shutil, "which", lambda name: None)
     assert start_https.main(["--mode", "tunnel"]) == 1
     assert "Install cloudflared" in capsys.readouterr().err
+
+
+ARP = """? (172.30.220.1) at 0:11:22:33:44:55 on en0 ifscope [ethernet]
+? (172.30.220.6) at c2:59:20:c0:d9:32 on en0 ifscope [ethernet]
+? (172.30.220.71) at 2a:51:89:16:9c:91 on en0 ifscope [ethernet]
+? (172.30.220.78) at 26:39:f8:d0:7e:a9 on en0 ifscope permanent [ethernet]
+? (172.30.220.90) at (incomplete) on en0 ifscope [ethernet]
+? (172.30.220.255) at ff:ff:ff:ff:ff:ff on en0 ifscope [ethernet]
+? (224.0.0.251) at 1:0:5e:0:0:fb on en0 ifscope permanent [ethernet]
+? (10.0.0.4) at aa:bb:cc:dd:ee:ff on en1 ifscope [ethernet]
+"""
+
+
+def test_arp_neighbors_keeps_real_devices_on_the_laptops_subnet():
+    assert start_https.arp_neighbors(ARP, "172.30.220.78") == ["172.30.220.1", "172.30.220.6", "172.30.220.71"]
+
+
+def test_isolation_warning_only_when_no_peer_answers():
+    peers = ["172.30.220.1", "172.30.220.6", "172.30.220.71"]
+    warning = start_https.isolation_warning(peers, "172.30.220.1", lambda ip: ip == "172.30.220.1")
+    assert warning and "hotspot" in warning and "--mode tunnel" in warning
+    assert start_https.isolation_warning(peers, "172.30.220.1", lambda ip: ip == "172.30.220.71") is None
+    assert start_https.isolation_warning(["172.30.220.1"], "172.30.220.1", lambda ip: False) is None  # router only
+    assert start_https.isolation_warning([], None, lambda ip: False) is None

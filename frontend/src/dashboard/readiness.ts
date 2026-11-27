@@ -17,7 +17,7 @@ export function readiness(s: SessionState | null, online: boolean): Readiness {
   if (!online) return { tone: "bad", headline: "Can't reach the server", detail: "Check that the server is still running on the laptop. This page reconnects by itself." };
   if (!s) return { tone: "idle", headline: "Connecting…", detail: "" };
   const live = s.phones.filter((p) => p.connected);
-  if (live.length === 0) return { tone: "idle", headline: "No phones yet", detail: "Open Phone QR and scan it on each phone, then tap Join." };
+  if (live.length === 0) return { tone: "idle", headline: "No phones yet", detail: "Open Phone QR and scan it on each phone, then tap Join. If the page never loads on the phones, this Wi-Fi blocks them: use a phone hotspot." };
   if (live.length < MIN_PHONES) {
     const need = MIN_PHONES - live.length;
     return { tone: "warn", headline: `${plural(live.length, "phone")} connected`, detail: `Add ${plural(need, "more phone")} to locate sounds. Three is the minimum, four or more is better.` };

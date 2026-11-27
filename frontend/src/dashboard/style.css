@@ -175,3 +175,8 @@ dialog svg { width: min(18rem, 100%); height: auto; }
 .steps li[data-state="running"] .step-state { color: var(--warn); }
 .steps li p { grid-column: 2 / 4; margin: .2rem 0 0; font-size: .9rem; color: var(--mute, #8996a1); }
 .steps li[data-state="failed"] p { color: var(--ink, #dde4ea); }
+
+/* Phone health: tint only the row's first cell so the table stays readable */
+.health tr[data-tone="warn"] td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.health tr[data-tone="bad"] td:first-child { box-shadow: inset 3px 0 0 var(--fail); }
+.health td:not(:first-child), .health th:not(:first-child) { text-align: right; }
