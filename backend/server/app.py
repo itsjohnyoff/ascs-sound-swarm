@@ -70,6 +70,15 @@ class NewTrial(BaseModel):
     event_id: str | None = None
 
 
+class PhonePing(BaseModel):
+    """Sent by the phone every few seconds; the server echoes t and stores the health fields."""
+    type: Literal["phone_ping"]
+    t: float
+    rtt_ms: float | None = Field(default=None, ge=0, le=60_000)
+    battery: float | None = Field(default=None, ge=0, le=1)
+    charging: bool | None = None
+
+
 class LocateArm(BaseModel):
     apply: bool = True  # False: only check whether phones moved
 
@@ -508,6 +517,13 @@ def create_app(
                         for pid in phones:
                             push_status(session, pid)
                         broadcast(session.snapshot())
+                elif raw_text is not None and '"phone_ping"' in raw_text:
+                    try:
+                        ping = PhonePing.model_validate_json(raw_text)
+                    except ValidationError:
+                        continue
+                    _enqueue(queue, {"type": "phone_pong", "t": ping.t})
+                    session.set_phone(phone_id, rtt_ms=ping.rtt_ms, battery=ping.battery, charging=ping.charging)
                 elif raw_text is not None:
                     try:
                         hello = PhoneHello.model_validate_json(raw_text)

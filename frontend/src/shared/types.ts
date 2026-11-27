@@ -10,6 +10,7 @@ export interface Phone {
   connected: boolean; rms: number; sync_state: SyncState;
   residual_ms: number | null; drift_ppm: number | null; chirp_snr_db: number | null;
   last_sync_ts: number | null; dropped_frames?: number;
+  rtt_ms?: number | null; battery?: number | null; charging?: boolean | null;
 }
 export interface SessionState {
   type: "session_state"; room: Room; phones: Phone[];

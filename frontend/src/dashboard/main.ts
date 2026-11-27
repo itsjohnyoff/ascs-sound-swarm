@@ -4,6 +4,7 @@ import type { CalibrationResult, Detection, Phone, SessionState, Trial } from ".
 import { isBusy, renderCalTable, runCalibration, runLevelCheck, unlockAudio } from "./calibration";
 import { FloorMap } from "./floorMap";
 import { FpsMeter } from "./fps";
+import { healthRows, phonesToResync } from "./health";
 import { freshSteps, readyButtonLabel, runGetReady, type ReadyDeps, type StepState } from "./getReady";
 import { locateSummary, runLocate } from "./locate";
 import { centred, distances, roomCentre, speakerOffCentre } from "./geometry";
@@ -102,7 +103,9 @@ function flashStatus() {
 // ---- session / sockets ---------------------------------------------------------------------
 const spread = new Set<string>();
 function applySession(s: SessionState) {
+  const previous = session?.phones ?? [];
   session = s;
+  scheduleResync(phonesToResync(previous, s.phones));
   // Phones that join on top of each other get their own spot so every dot is visible.
   for (const m of phonesToSpread(s.phones.filter((p) => p.connected), s.room, spread)) {
     spread.add(m.id);
@@ -112,8 +115,35 @@ function applySession(s: SessionState) {
   if (document.activeElement?.tagName !== "INPUT") fillForms(s);
   // The speaker is always the middle of the room, including after a size change or a server restart.
   if (speakerOffCentre(s.room)) void guard("layoutMsg", () => api.putRoom(centred(s.room)));
-  renderPhones(); renderDistances(); renderCalTableLive();
+  renderPhones(); renderDistances(); renderCalTableLive(); renderHealth();
   renderStatus(); renderTrials(); refresh();
+}
+
+// ---- phone health and automatic re-sync -------------------------------------------------------------
+function renderHealth() {
+  const rows = healthRows(livePhones(), Date.now() / 1000, (p) => p.label || p.phone_id);
+  $("health").innerHTML = rows.length
+    ? `<tr><th scope="col">Phone</th><th scope="col">Delay</th><th scope="col">Dropped</th><th scope="col">Battery</th><th scope="col">Synced</th></tr>` +
+      rows.map((r) => `<tr data-tone="${r.tone}"><td>${esc(r.name)}</td><td>${r.delay}</td><td>${r.dropped}</td><td>${r.battery}</td><td>${r.synced}</td></tr>`).join("")
+    : "";
+}
+setInterval(renderHealth, 5000); // keeps "synced N s ago" current
+
+let resyncTimer: ReturnType<typeof setTimeout> | undefined;
+let lastResync = 0;
+/** A phone rejoined: one chirp a moment later brings it back, unless something else is using the speaker. */
+function scheduleResync(ids: string[]) {
+  if (!ids.length || readyRunning || phase !== "idle") return;
+  clearTimeout(resyncTimer);
+  resyncTimer = setTimeout(() => {
+    if (isBusy() || readyRunning || phase !== "idle" || Date.now() - lastResync < 10_000) return;
+    lastResync = Date.now();
+    const names = ids.map(phoneName).join(", ");
+    say("resyncMsg", `${names} rejoined. Re-syncing…`);
+    void calibrate("lfm_single")
+      .then((r) => say("resyncMsg", r?.success ? `${names} rejoined and re-synced.` : `${names} rejoined. Press Get ready to re-sync.`, !r?.success))
+      .catch((e: Error) => say("resyncMsg", e.message, true));
+  }, 2500);
 }
 
 function fillForms(s: SessionState) {
@@ -156,8 +186,14 @@ function connect() {
     else if (m.type === "telemetry" && session) {
       for (const t of m.phones as Phone[]) {
         const p = session.phones.find((q) => q.phone_id === t.phone_id);
-        if (p) { p.rms = t.rms; p.connected = t.connected; p.sync_state = t.sync_state; }
+        if (p) {
+          Object.assign(p, {
+            rms: t.rms, connected: t.connected, sync_state: t.sync_state, dropped_frames: t.dropped_frames,
+            rtt_ms: t.rtt_ms, battery: t.battery, charging: t.charging, last_sync_ts: t.last_sync_ts,
+          });
+        }
       }
+      renderHealth();
       refresh();
     } else if (m.type === "calibration_result") showCalibration(m as CalibrationResult);
     else if (m.type === "detection") onDetection(m as Detection);

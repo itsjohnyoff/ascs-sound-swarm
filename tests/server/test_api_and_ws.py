@@ -86,6 +86,7 @@ def test_binary_ingestion_telemetry_and_disconnect():
                 assert telemetry["phones"] == [{
                     "phone_id": "nw", "rms": pytest.approx(0.25, abs=1e-4),
                     "connected": True, "sync_state": "unsynced", "dropped_frames": 1,
+                    "rtt_ms": None, "battery": None, "charging": None, "last_sync_ts": None,
                 }]
                 audio = session.buffers["nw"].get_recent_slice(1)
                 assert audio.start_sample_index == 0

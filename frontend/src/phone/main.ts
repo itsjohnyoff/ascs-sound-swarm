@@ -108,6 +108,16 @@ async function hello() {
 
 function setSync(s: PhoneStatus) { show(syncCopy(s)); }
 
+// ---- health: round trip and battery, shown on the laptop ----------------------------------------
+let lastRtt: number | null = null;
+type Battery = { level: number; charging: boolean };
+const battery = (navigator as Navigator & { getBattery?: () => Promise<Battery> }).getBattery?.().catch(() => null) ?? Promise.resolve(null);
+setInterval(async () => {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const b = await battery;
+  ws.send(JSON.stringify({ type: "phone_ping", t: performance.now(), rtt_ms: lastRtt, battery: b?.level ?? null, charging: b?.charging ?? null }));
+}, 5000);
+
 /** The laptop is locating the phones: play the calibration chirp now so the others can hear us. */
 async function emitChirp() {
   const out = ctx;
@@ -130,6 +140,7 @@ function connect() {
       const m = JSON.parse(ev.data);
       if (m.type === "phone_status") { setSync(m as PhoneStatus); void showPosition(); }
       else if (m.type === "emit_chirp") void emitChirp();
+      else if (m.type === "phone_pong") lastRtt = Math.round(performance.now() - (m as { t: number }).t);
       else if (m.type === "phone_hint") { const h = m as PhoneHint; show({ tone: h.tone, title: h.title, detail: h.detail }); }
     } catch { /* ignore */ }
   };

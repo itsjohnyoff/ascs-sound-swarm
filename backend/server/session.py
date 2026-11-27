@@ -312,7 +312,8 @@ class Session:
         return {
             "type": "telemetry",
             "phones": [
-                p.model_dump(include={"phone_id", "rms", "connected", "sync_state", "dropped_frames"})
+                p.model_dump(include={"phone_id", "rms", "connected", "sync_state", "dropped_frames",
+                                      "rtt_ms", "battery", "charging", "last_sync_ts"})
                 for p in self.phones.values()
             ],
         }

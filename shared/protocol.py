@@ -188,6 +188,9 @@ class PhoneConfig(BaseModel):
     last_sync_ts: float | None = None
     dropped_frames: int = 0
     device_info: str = ""
+    rtt_ms: float | None = None      # phone <-> server round trip, measured by the phone
+    battery: float | None = None     # 0..1 where the browser exposes it
+    charging: bool | None = None
 
 
 class PhoneSyncReport(BaseModel):

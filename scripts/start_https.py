@@ -154,6 +154,74 @@ def stop(process: subprocess.Popen) -> None:
             process.wait()
 
 
+ARP_LINE = re.compile(r"\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]+)", re.I)
+
+
+def arp_neighbors(arp_output: str, own_address: str) -> list[str]:
+    """Other devices this laptop has recently seen on its own /24 (from `arp -an`)."""
+    own = ipaddress.ip_address(own_address)
+    subnet = ipaddress.ip_network(f"{own_address}/24", strict=False)
+    found = []
+    for address, mac in ARP_LINE.findall(arp_output):
+        ip = ipaddress.ip_address(address)
+        if ip == own or ip not in subnet or ip in (subnet.network_address, subnet.broadcast_address):
+            continue
+        if mac.lower() in ("ff:ff:ff:ff:ff:ff",) or ip.is_multicast:
+            continue
+        found.append(address)
+    return sorted(set(found), key=ipaddress.ip_address)
+
+
+def isolation_warning(neighbors: list[str], gateway: str | None, reachable) -> str | None:
+    """Warn when other devices are on this Wi-Fi but none of them answer the laptop.
+
+    Venue and campus Wi-Fi often isolates clients: phones reach the internet but not the laptop.
+    The router always answers, so it doesn't count. Some phones ignore pings, so this is a hint.
+    """
+    peers = [ip for ip in neighbors if ip != gateway][:8]
+    if not peers:
+        return None
+    if any(reachable(ip) for ip in peers):
+        return None
+    return ("Warning: no other device on this Wi-Fi answers the laptop. The network may block phones from "
+            "reaching it (client isolation). If phones can't open the join URL, connect the laptop and phones "
+            "to a phone hotspot and restart, or use --mode tunnel.")
+
+
+def _ping(ip: str) -> bool:
+    flag = ["-t", "1"] if sys.platform == "darwin" else ["-W", "1"]
+    try:
+        return subprocess.run(["ping", "-c", "1", *flag, ip], capture_output=True, timeout=3).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _gateway() -> str | None:
+    try:
+        out = subprocess.run(["route", "-n", "get", "default"] if sys.platform == "darwin" else ["ip", "route"],
+                             capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"(?:gateway:|default via)\s+(\d+\.\d+\.\d+\.\d+)", out)
+    return match.group(1) if match else None
+
+
+def check_network(address: str) -> None:
+    """Run in the background so the server starts immediately; print only if there's a problem."""
+    try:
+        arp = subprocess.run(["arp", "-an"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    neighbors = arp_neighbors(arp, address)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        replies = dict(zip(neighbors, pool.map(_ping, neighbors)))
+    warning = isolation_warning(neighbors, _gateway(), lambda ip: replies.get(ip, False))
+    if warning:
+        print(warning, file=sys.stderr, flush=True)
+
+
 def serve(
     host: str,
     port: int,
@@ -245,12 +313,16 @@ def serve_tunnel() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("lan", "tunnel"), default="lan")
+    parser.add_argument("--skip-network-check", action="store_true",
+                        help="don't check whether this Wi-Fi lets other devices reach the laptop")
     args = parser.parse_args(argv)
     try:
         if args.mode == "tunnel":
             return serve_tunnel()
         address = lan_ipv4()
         cert_path, key_path = ensure_certificate(address, ROOT / "certs")
+        if not args.skip_network_check:
+            Thread(target=check_network, args=(address,), daemon=True).start()
         return serve(
             "0.0.0.0",
             LAN_PORT,

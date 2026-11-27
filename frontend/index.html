@@ -47,6 +47,9 @@
         <div class="row"><button id="calBtn">Calibrate</button><label class="inline"><input type="checkbox" id="auto" checked> Repeat every 30 s</label></div>
         <p class="note" id="calMsg" role="status"></p>
         <div class="table-scroll"><table id="calTable"></table></div>
+        <h3 style="font-size:var(--step-0);margin:1rem 0 .5rem">Phone health</h3>
+        <div class="table-scroll"><table id="health" class="health"></table></div>
+        <p class="note" id="resyncMsg" role="status"></p>
         <h3 style="font-size:var(--step-0);margin:1rem 0 .5rem">Record a test</h3>
         <div class="row record-actions"><div><label for="recName">File name</label><input id="recName" type="text" value="spike-01" maxlength="68"></div><button id="recStart" disabled>Start recording</button><button id="recStop" class="danger" disabled>Stop and save</button></div>
         <p class="note" id="recMsg" role="status"></p>
